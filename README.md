@@ -34,7 +34,7 @@ When you delete a conversation in T3 Code, T3 soft-deletes the thread in `statev
 - **Interactive TUI & scriptable CLI** — visual storage breakdown, per-session multi-select picker, auto-refreshing dashboard after each cleanup, live rescan (`r`), and one-key English / 中文 toggle (`l`).
 - **Fail-closed safety model** — refuses to run on unknown T3 database schemas, protects active/archived/subagent/in-flight sessions, enforces a 24h cooldown, and re-checks state right before touching disk.
 - **One-click reversible Trash bundle** — moves cleaned files into a single dated folder in macOS Trash along with `manifest.json` and a conflict-safe `restore.sh`.
-- **Safe index syncing** — when T3 & `agy` are completely closed, TUI session cleanups automatically remove only the matching `conversation_summaries.db` rows for the sessions being cleaned (leaving pre-existing stale entries to the dedicated **Prune index** action; toggleable via `p`, always skipped when T3 is running, and opt-in via `--prune-summaries` in CLI mode), after verifying the table contract and saving a consistent WAL-merged backup + merge-safe `restore.sh` to Trash.
+- **Safe index syncing** — automatically keeps `conversation_summaries.db` in sync for cleaned sessions when T3 & `agy` are closed (toggleable via `p`; opt-in `--prune-summaries` in CLI), always backing up a WAL-merged snapshot + merge-safe `restore.sh` to Trash first.
 
 ## Quick Install
 
@@ -93,7 +93,7 @@ Run `t3-session-cleaner --help` for all flags.
 
 ## Managed Scope
 
-`t3-session-cleaner` only inspects and manages `conversations/`, `brain/`, `annotations/`, and (opt-in) `conversation_summaries.db` inside T3's Antigravity profile directory. Other directories such as `implicit/` are **never touched**.
+`t3-session-cleaner` only inspects and manages `conversations/`, `brain/`, `annotations/`, and (when T3 is closed) `conversation_summaries.db` inside T3's Antigravity profile directory. Other directories such as `implicit/` are **never touched**.
 
 ## Safety Invariants (Fail-Closed)
 
@@ -116,7 +116,7 @@ bash ./t3-session-cleaner-YYYY-MM-DD_HHMMSS/restore.sh
 
 `restore.sh` moves each session back to its exact original paths and skips an entire UUID group if any target file conflicts.
 
-> **Note**: Restoring a session bundle from Trash restores the session files on disk, but does **not** automatically re-insert rows that were pruned from `conversation_summaries.db`. If you also pruned the index, run `restore.sh` inside the corresponding `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer rows.
+> **Note**: Restoring a session bundle from Trash restores the session files on disk, but does **not** automatically re-insert rows removed from `conversation_summaries.db`. If the index was also synced or pruned, run `restore.sh` inside the corresponding `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer rows.
 
 ## Requirements
 

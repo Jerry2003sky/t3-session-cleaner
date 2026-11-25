@@ -34,7 +34,7 @@
 - **交互式 TUI + 命令行双模式** — 可视化空间占比条、按会话逐条勾选、清理后自动刷新返回主界面、原地刷新状态（`r`）、一键实时切换中/英文（`l`）。
 - **Fail-Closed 安全防护** — 数据库结构升级自动拒跑，默认保护活跃/已归档/子代理/传输中会话与 24h 冷静期，动手前再次实时复检。
 - **单包废纸篓、一键无损还原** — 将每次清理的文件打包成单个带时间戳目录移入 macOS 废纸篓，内置 `manifest.json` 与防冲突 `restore.sh`。
-- **安全同步索引清理** — 在 TUI 模式下，若 T3 与 `agy` 已完全退出，清理会话时会自动同步删除**仅对应本次清理会话**的 `conversation_summaries.db` 记录（原有失效索引仍交由独立的「清理索引」处理；确认页明确展示并可按 `p` 关闭；T3 运行中自动跳过，CLI 模式仍需显式 `--prune-summaries`），改库前先将完整 WAL 合并备份（含增量合并 `restore.sh`）送入废纸篓。
+- **安全同步索引清理** — 当 T3 与 `agy` 已完全退出时，TUI 清理会自动同步移除本次清理会话对应的 `conversation_summaries.db` 条目（可按 `p` 开关；CLI 需显式 `--prune-summaries`），改库前先将完整 WAL 合并备份与增量还原脚本送入废纸篓。
 
 ## 快速安装
 
@@ -93,7 +93,7 @@ t3-session-cleaner --lang zh -n
 
 ## 管理范围
 
-`t3-session-cleaner` 仅检查和管理 T3 的 Antigravity Profile 目录下的 `conversations/`、`brain/`、`annotations/` 以及（可选）`conversation_summaries.db`。诸如 `implicit/` 等其他目录**完全不触碰**。
+`t3-session-cleaner` 仅检查和管理 T3 的 Antigravity Profile 目录下的 `conversations/`、`brain/`、`annotations/` 以及（仅在 T3 退出时）`conversation_summaries.db`。诸如 `implicit/` 等其他目录**完全不触碰**。
 
 ## 5 条安全不变量（Fail-Closed）
 
@@ -116,7 +116,7 @@ bash ./t3-session-cleaner-YYYY-MM-DD_HHMMSS/restore.sh
 
 `restore.sh` 会按会话 UUID 整组将文件移回原路径，若目标侧存在同名或同 UUID 冲突则整组跳过、绝不覆盖。
 
-> **注意**：从废纸篓还原会话文件不会自动恢复已被清理的 `conversation_summaries.db` 索引行。如果之前同时清理过索引，请另行运行对应 `t3-session-cleaner-summaries-backup-*` 备份目录里的 `restore.sh`，它只会把缺失行补回当前库，不会丢失之后新增的记录。
+> **注意**：从废纸篓还原会话文件不会自动恢复已从 `conversation_summaries.db` 移除的索引行。如果当时同时同步清理过索引，请另行运行对应 `t3-session-cleaner-summaries-backup-*` 备份目录里的 `restore.sh`，它只会把缺失行补回当前库，不会丢失之后新增的记录。
 
 ## 运行环境
 
