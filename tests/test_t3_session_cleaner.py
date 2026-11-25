@@ -1,4 +1,4 @@
-"""Isolated unit and PTY integration tests for t3-clean-agy.
+"""Isolated unit and PTY integration tests for t3-session-cleaner.
 
 All tests run inside tempfile.TemporaryDirectory() with isolated XDG_CONFIG_HOME
 and T3_CLEAN_TRASH_BIN — never touching ~/.t3, ~/.config, or macOS Trash.
@@ -31,15 +31,15 @@ from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "t3-clean-agy"
+SCRIPT = REPO_ROOT / "t3-session-cleaner"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def load_module():
-    loader = importlib.machinery.SourceFileLoader("t3_clean_agy_mod", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("t3_clean_agy_mod", loader)
+    loader = importlib.machinery.SourceFileLoader("t3_session_cleaner_mod", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("t3_session_cleaner_mod", loader)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["t3_clean_agy_mod"] = mod
+    sys.modules["t3_session_cleaner_mod"] = mod
     loader.exec_module(mod)
     return mod
 
@@ -261,7 +261,7 @@ def run_pty(cmd, env, cols=92, rows=26, steps=()):
     return proc.returncode, captures
 
 
-class TestT3CleanAgy(unittest.TestCase):
+class TestT3SessionCleaner(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -360,7 +360,7 @@ class TestT3CleanAgy(unittest.TestCase):
         r_ok = subprocess.run([str(SCRIPT), "--t3-home", str(t), "--apply", "-y"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r_ok.returncode, 0, r_ok.stdout + r_ok.stderr)
         self.assertFalse(target_db.exists())
-        bundles = list(self.trash_dir.glob("t3-clean-agy-2*"))
+        bundles = list(self.trash_dir.glob("t3-session-cleaner-2*"))
         self.assertEqual(len(bundles), 1)
         self.assertTrue((bundles[0] / "manifest.json").is_file())
         r_rest = subprocess.run(["bash", str(bundles[0] / "restore.sh")], capture_output=True, text=True)
@@ -385,7 +385,7 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertIn("unexpected tables", r_idx.stdout)
         self.assertNotIn("0 session(s)", r_idx.stdout)
 
-        backups = list(self.trash_dir.glob("t3-clean-agy-summaries-backup-*-aaaa1111"))
+        backups = list(self.trash_dir.glob("t3-session-cleaner-summaries-backup-*-aaaa1111"))
         self.assertEqual(len(backups), 1)
         c0 = sqlite3.connect(acps[0] / "conversation_summaries.db")
         self.assertEqual(c0.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
@@ -468,7 +468,7 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertNotIn("rolled back", combined_a.lower())
         staging_a = acps_a[0].parent / ".t3-clean-staging"
         self.assertIn(str(staging_a), combined_a)
-        staged_bundles_a = list(staging_a.glob("t3-clean-agy-*"))
+        staged_bundles_a = list(staging_a.glob("t3-session-cleaner-*"))
         self.assertEqual(len(staged_bundles_a), 1)
         preserved_a = staged_bundles_a[0] / "conversations" / f"{del_a[0]}.db"
         self.assertTrue(preserved_a.is_file())
@@ -501,7 +501,7 @@ class TestT3CleanAgy(unittest.TestCase):
             self.assertNotIn("rolled back", combined_b.lower())
             staging_b = acps_b[0].parent / ".t3-clean-staging"
             self.assertIn(str(staging_b), combined_b)
-            bundles_b = list(staging_b.glob("t3-clean-agy-*"))
+            bundles_b = list(staging_b.glob("t3-session-cleaner-*"))
             self.assertEqual(len(bundles_b), 1)
             preserved_b = bundles_b[0] / "conversations" / f"{del_b[0]}.db"
             self.assertTrue(preserved_b.is_file())
@@ -719,7 +719,7 @@ class TestT3CleanAgy(unittest.TestCase):
 
         r = subprocess.run([str(SCRIPT), "--t3-home", str(t), "--apply", "-y", "--prune-summaries", "--skip-lsof"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        backup = next(self.trash_dir.glob("t3-clean-agy-summaries-backup-*"))
+        backup = next(self.trash_dir.glob("t3-session-cleaner-summaries-backup-*"))
         restore_sh = backup / "restore.sh"
 
         # Add a NEW row after backup; restore must keep new row AND bring back pruned row
@@ -777,7 +777,7 @@ class TestT3CleanAgy(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(r_c.returncode, 0, r_c.stdout + r_c.stderr)
-        b_c = next(trash_chk.glob("t3-clean-agy-summaries-backup-*"))
+        b_c = next(trash_chk.glob("t3-session-cleaner-summaries-backup-*"))
         # Recreate target table with strict CHECK(step_count > 0) so restoring 0-step orphan fails transaction
         sdb_c.unlink()
         for suf in ("-wal", "-shm", "-journal"):
@@ -873,12 +873,12 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertEqual(c.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
         c.close()
 
-    def test_r08_process_check_does_not_ignore_t3_clean_agy_in_other_pid(self):
+    def test_r08_process_check_does_not_ignore_t3_session_cleaner_in_other_pid(self):
         prof = self.root / "fake_profile_hash"
         prof.mkdir()
         self.assertFalse(mod.is_profile_in_use_by_process(prof))
         holder = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)", str(prof.resolve()), "/tmp/t3-clean-agy"],
+            [sys.executable, "-c", "import time; time.sleep(30)", str(prof.resolve()), "/tmp/t3-session-cleaner"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         try:
@@ -948,7 +948,7 @@ class TestT3CleanAgy(unittest.TestCase):
                     mod.trash_profile_bundle(acp, chosen, mod.Translator("en"), ts="2026-11-25_000000", multi_profile=False)
 
         staging = acp.parent / ".t3-clean-staging"
-        bundles = list(staging.glob("t3-clean-agy-*"))
+        bundles = list(staging.glob("t3-session-cleaner-*"))
         self.assertEqual(len(bundles), 1)
         bundle_with = bundles[0]
         self.assertTrue((bundle_with / "manifest.json").is_file())
@@ -1130,7 +1130,7 @@ class TestT3CleanAgy(unittest.TestCase):
                     rc1 = mod.execute_cleanup(t, reps, [], prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc1, 0)
         self.assertIn("1", out1.getvalue())
-        self.assertIn("t3-clean-agy-summaries-backup-", out1.getvalue())
+        self.assertIn("t3-session-cleaner-summaries-backup-", out1.getvalue())
         self.assertIn("disk is full", out1.getvalue())
 
         # Case 2: DELETE fails after backup -> still reports backup name and returns 1
@@ -1171,7 +1171,7 @@ class TestT3CleanAgy(unittest.TestCase):
                 with redirect_stdout(out2), redirect_stderr(err2):
                     rc2 = mod.execute_cleanup(t2, reps2, [], prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc2, 1)
-        self.assertIn("t3-clean-agy-summaries-backup-", out2.getvalue() + err2.getvalue())
+        self.assertIn("t3-session-cleaner-summaries-backup-", out2.getvalue() + err2.getvalue())
 
     def test_r15_min_age_rejects_nan_inf_and_negative(self):
         t = self.root / "t_r15"
@@ -1374,7 +1374,7 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertTrue(u2_db.exists(), "Non-conflicting u2 must still roll back normally")
 
         staging = acp.parent / ".t3-clean-staging"
-        bundles = list(staging.glob("t3-clean-agy-*"))
+        bundles = list(staging.glob("t3-session-cleaner-*"))
         self.assertEqual(len(bundles), 1)
         self.assertTrue((bundles[0] / "conversations" / f"{u1}.db").is_file())
         self.assertTrue((bundles[0] / "conversations" / f"{u1}.db-wal").is_file())
@@ -1402,7 +1402,7 @@ class TestT3CleanAgy(unittest.TestCase):
         )
         self.assertEqual(r2.returncode, 1)
         self.assertFalse((acps2[0] / "conversations" / f"{u_only}.db").exists())
-        bundles2 = list((acps2[0].parent / ".t3-clean-staging").glob("t3-clean-agy-*"))
+        bundles2 = list((acps2[0].parent / ".t3-clean-staging").glob("t3-session-cleaner-*"))
         self.assertEqual(len(bundles2), 1)
         self.assertTrue((bundles2[0] / "conversations" / f"{u_only}.db").is_file())
 
@@ -1439,7 +1439,7 @@ class TestT3CleanAgy(unittest.TestCase):
         combined = r.stdout + r.stderr
         self.assertNotIn("rolled back", combined.lower())
         self.assertIn("trash", combined.lower())
-        trashed = list(self.trash_dir.glob("t3-clean-agy-*"))
+        trashed = list(self.trash_dir.glob("t3-session-cleaner-*"))
         self.assertEqual(len(trashed), 1)
         self.assertIn(trashed[0].name, combined)
         # Must NOT prune summaries when trash status is uncertain
@@ -1624,7 +1624,7 @@ class TestT3CleanAgy(unittest.TestCase):
         c.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)", (orphans[0], "", 0, "0001-01-01 00:00:00", ""))
         c.commit()
         c.close()
-        bundle = staging / "t3-clean-agy-leftover"
+        bundle = staging / "t3-session-cleaner-leftover"
         bundle.mkdir()
         (bundle / "restore.sh").write_text("#!/usr/bin/env bash\n")
         other = staging / "unknown.dat"
@@ -1707,16 +1707,16 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertBoxAligned(caps[4], 92, "deep-end-zh")
 
         exit_out = strip_ansi(caps[5] + caps[6])
-        self.assertIn("t3-clean-agy-2", exit_out)
-        self.assertIn("t3-clean-agy-summaries-backup-", exit_out)
+        self.assertIn("t3-session-cleaner-2", exit_out)
+        self.assertIn("t3-session-cleaner-summaries-backup-", exit_out)
 
         self.assertFalse(target_db.exists())
         c = sqlite3.connect(acps[0] / "conversation_summaries.db")
         rows = [r[0] for r in c.execute("SELECT conversation_id FROM conversation_summaries").fetchall()]
         c.close()
         self.assertEqual(rows, ["11111111-1111-1111-1111-111111111111"])
-        self.assertEqual(len(list(self.trash_dir.glob("t3-clean-agy-2*"))), 1)
-        self.assertEqual(len(list(self.trash_dir.glob("t3-clean-agy-summaries-backup-*"))), 2)
+        self.assertEqual(len(list(self.trash_dir.glob("t3-session-cleaner-2*"))), 1)
+        self.assertEqual(len(list(self.trash_dir.glob("t3-session-cleaner-summaries-backup-*"))), 2)
 
     def test_tui_confirm_p_toggle_and_multi_step_cleanup_in_one_session(self):
         # 1 old deleted session (>24h) + 1 cooldown deleted session (<24h), both in summaries.db.
