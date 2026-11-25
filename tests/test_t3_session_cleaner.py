@@ -1845,6 +1845,80 @@ class TestT3SessionCleaner(unittest.TestCase):
         self.assertIn("encountered error", strip_ansi(caps_e[3].split("\x1b[H")[-1]))
         self.assertTrue((acps_e[0] / "conversations" / f"{del_e[0]}.db").exists())
 
+    def test_superseded_transfer_and_handoff_are_terminal_while_active_ones_protect(self):
+        # Deleted fork sessions referenced only by terminal 'superseded' transfer/handoff rows
+        # must remain DELETED (cleanable), whereas non-terminal pending/resolved_native transfers,
+        # pending handoffs, and pending outbox items must stay protected as ACTIVE with localized notes.
+        t = self.root / "t_transfer_superseded"
+        acps, del_ids = make_fixture(t, del_sizes=(4096, 4096, 4096, 4096, 4096), del_age_hours=72.0)
+        u_sup_xfer, u_sup_ho, u_pend_xfer, u_pend_ho, u_pend_out = del_ids
+
+        conn = sqlite3.connect(t / "userdata" / "statev2.sqlite")
+        # Terminal superseded transfer (t-del-0 -> t-act) & superseded handoff (t-act referencing u_sup_ho)
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_transfers VALUES (?,?,?,?)",
+            ("t-del-0", "t-act", "superseded", json.dumps({"sourcePoint": {"providerThreadRef": {"nativeId": u_sup_xfer}}})),
+        )
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_handoffs VALUES (?,?,?)",
+            ("t-act", "superseded", json.dumps({"summaryText": f"old handoff {u_sup_ho}"})),
+        )
+        # Non-terminal: superseded BEFORE pending for u_pend_xfer must skip superseded and protect via pending
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_transfers VALUES (?,?,?,?)",
+            ("t-del-2", "t-act", "superseded", json.dumps({"sourcePoint": {"providerThreadRef": {"nativeId": u_pend_xfer}}})),
+        )
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_transfers VALUES (?,?,?,?)",
+            ("t-del-2", "t-act", "pending", json.dumps({"sourcePoint": {"providerThreadRef": {"nativeId": u_pend_xfer}}})),
+        )
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_handoffs VALUES (?,?,?)",
+            ("t-act", "pending", json.dumps({"summaryText": f"active handoff {u_pend_ho}"})),
+        )
+        conn.execute(
+            "INSERT INTO orchestration_v2_effect_outbox VALUES (?,?,?)",
+            ("t-act", "pending", json.dumps({"nativeThreadId": u_pend_out})),
+        )
+        conn.commit()
+        conn.close()
+
+        _, reps = mod.build_plan(t, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
+        by_id = {s.uuid: s for s in reps[0].sessions}
+
+        # Superseded-only rows stay DELETED & selectable
+        self.assertEqual(by_id[u_sup_xfer].category, "DELETED")
+        self.assertTrue(by_id[u_sup_xfer].selected)
+        self.assertEqual(by_id[u_sup_ho].category, "DELETED")
+        self.assertTrue(by_id[u_sup_ho].selected)
+
+        # Non-terminal rows remain protected as ACTIVE with localized notes (no raw English status leak)
+        tr_zh, tr_en = mod.Translator("zh"), mod.Translator("en")
+        self.assertEqual(by_id[u_pend_xfer].category, "ACTIVE")
+        self.assertEqual(mod.session_note(by_id[u_pend_xfer], tr_zh), "上下文待传")
+        self.assertEqual(mod.session_note(by_id[u_pend_xfer], tr_en), "Transfer")
+
+        self.assertEqual(by_id[u_pend_ho].category, "ACTIVE")
+        self.assertEqual(mod.session_note(by_id[u_pend_ho], tr_zh), "上下文交接")
+        self.assertEqual(mod.session_note(by_id[u_pend_ho], tr_en), "Handoff")
+
+        self.assertEqual(by_id[u_pend_out].category, "ACTIVE")
+        self.assertEqual(mod.session_note(by_id[u_pend_out], tr_zh), "待执行任务")
+        self.assertEqual(mod.session_note(by_id[u_pend_out], tr_en), "Queued task")
+
+        # Also verify resolved_native stays protected (non-terminal until consumed)
+        conn = sqlite3.connect(t / "userdata" / "statev2.sqlite")
+        conn.execute(
+            "INSERT INTO orchestration_v2_projection_context_transfers VALUES (?,?,?,?)",
+            ("t-del-0", "t-act", "resolved_native", json.dumps({"sourcePoint": {"providerThreadRef": {"nativeId": u_sup_xfer}}})),
+        )
+        conn.commit()
+        conn.close()
+        _, reps2 = mod.build_plan(t, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
+        by_id2 = {s.uuid: s for s in reps2[0].sessions}
+        self.assertEqual(by_id2[u_sup_xfer].category, "ACTIVE")
+        self.assertEqual(mod.session_note(by_id2[u_sup_xfer], tr_zh), "上下文待传")
+
 
 if __name__ == "__main__":
     unittest.main()

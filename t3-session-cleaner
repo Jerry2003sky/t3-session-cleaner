@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 STRICT_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -69,8 +69,8 @@ REQUIRED_SCHEMA: Dict[str, Set[str]] = {
     "orchestration_v2_effect_outbox": {"thread_id", "status", "payload_json"},
 }
 
-TERMINAL_HANDOFF_STATUSES = {"ready", "consumed", "completed", "cancelled", "failed", "disposed"}
-TERMINAL_TRANSFER_STATUSES = {"consumed", "resolved_portable", "cancelled", "failed", "disposed"}
+TERMINAL_HANDOFF_STATUSES = {"ready", "consumed", "completed", "cancelled", "failed", "disposed", "superseded"}
+TERMINAL_TRANSFER_STATUSES = {"consumed", "resolved_portable", "cancelled", "failed", "disposed", "superseded"}
 TERMINAL_OUTBOX_STATUSES = {"succeeded", "cancelled"}
 
 
@@ -200,6 +200,9 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "note_subagent": "子代理",
         "note_del_subagent": "已删子代理",
         "note_cur_env": "当前会话",
+        "note_handoff": "上下文交接",
+        "note_transfer": "上下文待传",
+        "note_outbox": "待执行任务",
         "note_super": "历史旧版",
         "note_unknown": "无线程关联",
         "note_locked": "占用中",
@@ -371,6 +374,9 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "note_subagent": "Subagent",
         "note_del_subagent": "Del subagent",
         "note_cur_env": "Current shell",
+        "note_handoff": "Handoff",
+        "note_transfer": "Transfer",
+        "note_outbox": "Queued task",
         "note_super": "Superseded",
         "note_unknown": "Unlinked",
         "note_locked": "In use",
@@ -1009,7 +1015,7 @@ def load_t3_state(db_path: Path) -> T3State:
         ).fetchall():
             if tid in live_threads and status not in TERMINAL_HANDOFF_STATUSES:
                 for u in extract_uuids(pjson, exclude=[tid]):
-                    mark(active_uuids, u, status, live_threads[tid][0])
+                    mark(active_uuids, u, "@note_handoff", live_threads[tid][0])
 
         for src_tid, dst_tid, status, pjson in cur.execute(
             "SELECT source_thread_id, target_thread_id, status, payload_json "
@@ -1018,7 +1024,7 @@ def load_t3_state(db_path: Path) -> T3State:
             if (src_tid in live_threads or dst_tid in live_threads) and status not in TERMINAL_TRANSFER_STATUSES:
                 title = live_threads.get(dst_tid, ("", None))[0] or live_threads.get(src_tid, ("", None))[0]
                 for u in extract_uuids(pjson, exclude=[src_tid, dst_tid]):
-                    mark(active_uuids, u, status, title)
+                    mark(active_uuids, u, "@note_transfer", title)
 
         for tid, status, pjson in cur.execute(
             "SELECT thread_id, status, payload_json FROM orchestration_v2_effect_outbox"
@@ -1026,7 +1032,7 @@ def load_t3_state(db_path: Path) -> T3State:
             if status not in TERMINAL_OUTBOX_STATUSES:
                 title = live_threads.get(tid, ("", None))[0]
                 for u in extract_uuids(pjson, exclude=[tid]):
-                    mark(active_uuids, u, status, title)
+                    mark(active_uuids, u, "@note_outbox", title)
 
         for tid, provider, pjson in cur.execute(
             "SELECT thread_id, provider, payload_json FROM orchestration_v2_projection_run_attempts"
