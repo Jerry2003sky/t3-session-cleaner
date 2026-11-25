@@ -78,7 +78,12 @@ def make_stub_trash(bin_dir: Path, trash_dir: Path, *, fail: bool = False, name:
             "for a in sys.argv[1:]:\n"
             "    if a.startswith('-'): continue\n"
             "    p = Path(a)\n"
-            "    shutil.move(str(p), str(dst_root / p.name))\n"
+            "    dst = dst_root / p.name\n"
+            "    i = 1\n"
+            "    while dst.exists():\n"
+            "        dst = dst_root / f'{p.name}-{i}'\n"
+            "        i += 1\n"
+            "    shutil.move(str(p), str(dst))\n"
         )
     stub.chmod(0o755)
     return stub
@@ -204,9 +209,10 @@ def run_pty(cmd, env, cols=92, rows=26, steps=()):
     proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
     os.close(slave)
 
-    def drain(wait=0.25):
+    def drain(wait=0.25, expect=None, timeout=5.0):
         out = bytearray()
-        deadline = time.time() + wait
+        deadline = time.time() + (timeout if expect else wait)
+        matched = False
         while time.time() < deadline:
             if not select.select([master], [], [], max(0.02, deadline - time.time()))[0]:
                 break
@@ -215,21 +221,35 @@ def run_pty(cmd, env, cols=92, rows=26, steps=()):
                 if not chunk:
                     break
                 out.extend(chunk)
-                deadline = min(deadline, time.time() + 0.08)
+                if expect:
+                    if not matched and expect in strip_ansi(out.decode("utf-8", errors="replace")):
+                        matched = True
+                        deadline = min(deadline, time.time() + 0.12)
+                    elif matched:
+                        deadline = min(deadline, time.time() + 0.06)
+                else:
+                    deadline = min(deadline, time.time() + 0.08)
             except OSError:
                 break
         return out.decode("utf-8", errors="replace")
 
     captures = [drain(0.6)]
     for action in steps:
+        expect = None
         if callable(action):
             action(proc, master)
+        elif isinstance(action, tuple):
+            data, expect = action
+            try:
+                os.write(master, data)
+            except OSError:
+                break
         else:
             try:
                 os.write(master, action)
             except OSError:
                 break
-        captures.append(drain(0.45))
+        captures.append(drain(0.45, expect=expect))
 
     try:
         proc.wait(timeout=3)
@@ -323,6 +343,8 @@ class TestT3CleanAgy(unittest.TestCase):
         self.assertEqual(len(chosen), 2)
         self.assertEqual(mod.estimate_pruned_summaries(reps, []), 2)
         self.assertEqual(mod.estimate_pruned_summaries(reps, chosen), 4)
+        self.assertEqual(mod.estimate_pruned_summaries(reps, chosen, only_cleaned=True), 2)
+        self.assertEqual(mod.estimate_pruned_summaries(reps, [], only_cleaned=True), 0)
 
     def test_bundled_trash_restore_and_atomic_rollback(self):
         t = self.root / "t_trash"
@@ -871,22 +893,32 @@ class TestT3CleanAgy(unittest.TestCase):
         acps, del_ids = make_fixture(t, del_sizes=(4096,))
         target = acps[0] / "conversations" / f"{del_ids[0]}.db"
 
-        # TUI with --permanent -y must STILL show confirm view AND still require typing DELETE
+        # TUI with --permanent -y must STILL show confirm view AND still require typing DELETE;
+        # empty Enter cancels back to Main Menu without deleting, then typing DELETE executes and returns to refreshed Main Menu.
         rc, caps = run_pty(
             [str(SCRIPT), "--t3-home", str(t), "-i", "--permanent", "-y", "--skip-lsof", "--lang", "en"],
             self.env,
             cols=92,
             rows=26,
             steps=[
-                b"\r",  # Enter on Standard clean -> must open Confirm screen (NOT delete immediately)
-                b"y",   # Confirm in TUI -> must prompt for DELETE
-                b"\r",  # Empty Enter at DELETE prompt -> must cancel without deleting!
+                (b"\r", "Confirm Permanent Delete"),  # Enter on Standard clean -> Confirm screen
+                (b"y", "DELETE"),                     # Confirm in TUI -> prompt for DELETE
+                (b"\r", "Cancelled."),                # Empty Enter -> cancel back to Main Menu without deleting!
+                (b"\r", "Confirm Permanent Delete"),  # Re-enter Standard clean
+                (b"y", "DELETE"),                     # Confirm in TUI -> prompt for DELETE again
+                (b"DELETE\r", "100% active"),         # Type DELETE -> delete + sync summaries, return to refreshed Main Menu
+                b"q",                                 # Quit TUI cleanly
             ],
         )
         self.assertEqual(rc, 0)
         self.assertIn("Confirm Permanent Delete", strip_ansi(caps[1]))
         self.assertIn("DELETE", strip_ansi(caps[2]))
-        self.assertTrue(target.exists(), "Empty Enter at DELETE prompt must not delete file")
+        self.assertIn("Cancelled.", strip_ansi(caps[3]))
+        self.assertIn("100% active", strip_ansi(caps[6].split("\x1b[H")[-1]))
+        self.assertFalse(target.exists(), "Typing DELETE must permanently remove file")
+        c = sqlite3.connect(acps[0] / "conversation_summaries.db")
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
+        c.close()
 
     def test_r10_staging_manifest_and_restore_written_before_move_and_warning_has_path(self):
         t = self.root / "t_r10"
@@ -1388,7 +1420,12 @@ class TestT3CleanAgy(unittest.TestCase):
             "for a in sys.argv[1:]:\n"
             "    if a.startswith('-'): continue\n"
             "    p = Path(a)\n"
-            "    shutil.move(str(p), str(dst_root / p.name))\n"
+            "    dst = dst_root / p.name\n"
+            "    i = 1\n"
+            "    while dst.exists():\n"
+            "        dst = dst_root / f'{p.name}-{i}'\n"
+            "        i += 1\n"
+            "    shutil.move(str(p), str(dst))\n"
             "sys.stderr.write('trash exited 1 after move\\n')\n"
             "sys.exit(1)\n"
         )
@@ -1623,6 +1660,190 @@ class TestT3CleanAgy(unittest.TestCase):
         (staging / ".DS_Store").symlink_to(target_file)
         _, reps4 = mod.build_plan(t, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
         self.assertEqual(reps4[0].staging_leftovers, [staging / ".DS_Store"])
+
+    def test_tui_deep_clean_syncs_summaries_and_returns_to_refreshed_menu(self):
+        # Cooldown deleted session has a live row in summaries.db PLUS 2 pre-existing stale orphan rows.
+        # Deep clean while T3 is closed must trash the session AND remove ONLY its matching summaries.db row
+        # (leaving the 2 pre-existing stale orphan rows untouched for the dedicated Prune index action!),
+        # then return directly to the refreshed Main Menu instead of exiting.
+        t = self.root / "t_tui_deep_sync"
+        pre_orphans = (
+            "33333333-3333-3333-3333-000000000001",
+            "33333333-3333-3333-3333-000000000002",
+        )
+        acps, del_ids = make_fixture(t, del_sizes=(4096,), del_age_hours=2.0, orphan_ids=pre_orphans)
+        target_db = acps[0] / "conversations" / f"{del_ids[0]}.db"
+
+        rc, caps = run_pty(
+            [str(SCRIPT), "--t3-home", str(t), "--skip-lsof", "--lang", "zh"],
+            self.env,
+            cols=92,
+            rows=26,
+            steps=[
+                (b"\r", "同步清理对应的 1 条 summaries.db 索引"),  # Cursor on 彻底清理 -> only 1 matching row, not 3!
+                (b"y", "2 · 可清理"),                              # Trash session + remove 1 matching row -> 2 pre-existing orphans intact!
+                (b"\r", "同步清理 summaries.db 约 2 条失效索引"),    # Cursor moved to 清理索引 -> confirm pruning the 2 pre-existing orphans
+                (b"y", "已干净"),                                  # Prune 2 pre-existing orphans -> refreshed Main Menu shows 已干净
+                b"q",                                             # Quit TUI -> scrollback prints bundle & backup names
+            ],
+        )
+        self.assertEqual(rc, 0)
+        home0 = strip_ansi(caps[0].split("\x1b[H")[-1])
+        self.assertIn("全部已删、旧版会话及对应索引", home0)
+        self.assertBoxAligned(caps[0], 92, "deep-home-zh")
+
+        conf = strip_ansi(caps[1].split("\x1b[H")[-1])
+        self.assertIn("同步清理对应的 1 条 summaries.db 索引", conf)
+        self.assertBoxAligned(caps[1], 92, "deep-confirm-zh")
+
+        home_mid = strip_ansi(caps[2].split("\x1b[H")[-1])
+        self.assertIn("无残留文件", home_mid)
+        self.assertIn("2 · 可清理", home_mid)
+        self.assertIn("并同步清理 1 条索引", home_mid)
+        self.assertBoxAligned(caps[2], 92, "deep-mid-zh")
+
+        home_end = strip_ansi(caps[4].split("\x1b[H")[-1])
+        self.assertIn("已干净", home_end)
+        self.assertBoxAligned(caps[4], 92, "deep-end-zh")
+
+        exit_out = strip_ansi(caps[5] + caps[6])
+        self.assertIn("t3-clean-agy-2", exit_out)
+        self.assertIn("t3-clean-agy-summaries-backup-", exit_out)
+
+        self.assertFalse(target_db.exists())
+        c = sqlite3.connect(acps[0] / "conversation_summaries.db")
+        rows = [r[0] for r in c.execute("SELECT conversation_id FROM conversation_summaries").fetchall()]
+        c.close()
+        self.assertEqual(rows, ["11111111-1111-1111-1111-111111111111"])
+        self.assertEqual(len(list(self.trash_dir.glob("t3-clean-agy-2*"))), 1)
+        self.assertEqual(len(list(self.trash_dir.glob("t3-clean-agy-summaries-backup-*"))), 2)
+
+    def test_tui_confirm_p_toggle_and_multi_step_cleanup_in_one_session(self):
+        # 1 old deleted session (>24h) + 1 cooldown deleted session (<24h), both in summaries.db.
+        # Step 1: Standard clean with 'p' toggled OFF -> leaves 1 stale summary row and returns to menu.
+        # Step 2: Deep clean in the SAME TUI session -> cleans cooldown session & ONLY its 1 matching row
+        #         (the 1 stale row skipped in Step 1 stays untouched as 1 · Ready).
+        # Step 3: Prune index in the SAME TUI session -> cleans that remaining 1 stale row.
+        t = self.root / "t_tui_multistep"
+        acps, del_old = make_fixture(t, del_sizes=(4096,), del_age_hours=72.0)
+        acp = acps[0]
+        u_cd = "22222222-2222-2222-2222-000000000099"
+        c_t3 = sqlite3.connect(t / "userdata" / "statev2.sqlite")
+        c_t3.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?)", ("t-cd", "Cooldown", "antigravity", "antigravity", None, iso_utc_ago(1.0)))
+        c_t3.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?)", ("t-cd", "antigravity", f"native-thread:{u_cd}", json.dumps({"nativeThreadRef": {"driver": "antigravity", "nativeId": u_cd}})))
+        c_t3.commit()
+        c_t3.close()
+        f_cd = acp / "conversations" / f"{u_cd}.db"
+        f_cd.write_bytes(b"C" * 2048)
+        sc = sqlite3.connect(acp / "conversation_summaries.db")
+        sc.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)", (u_cd, "Cooldown", 2, "2026-11-26", ""))
+        sc.commit()
+        sc.close()
+
+        rc, caps = run_pty(
+            [str(SCRIPT), "--t3-home", str(t), "--skip-lsof", "--lang", "en"],
+            self.env,
+            cols=92,
+            rows=26,
+            steps=[
+                (b"\r", "Also remove 1 matching summaries.db"),    # Standard clean -> Confirm screen (index sync ON: 1)
+                (b"p", "Skip 1 matching summaries.db"),            # Toggle index sync OFF
+                (b"y", "1 · Ready"),                               # File-only clean -> Main Menu (cursor moves to Deep clean)
+                (b"\r", "Also remove 1 matching summaries.db"),    # Deep clean -> ONLY its 1 matching row (not 2!)
+                (b"y", "removed 1 index"),                         # Deep clean removes 1 matching row; Step 1's orphan remains!
+                (b"\r", "Prune ~1 stale index"),                   # Cursor moved to Prune index -> confirm pruning leftover orphan
+                (b"y", "Pruned 1 stale index"),                    # Prune leftover orphan -> Clean
+                b"q",                                              # Quit
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("Also remove 1 matching summaries.db", strip_ansi(caps[1].split("\x1b[H")[-1]))
+        self.assertIn("Skip 1 matching summaries.db", strip_ansi(caps[2].split("\x1b[H")[-1]))
+        self.assertIn("1 · Ready", strip_ansi(caps[3].split("\x1b[H")[-1]))
+        self.assertIn("Also remove 1 matching summaries.db", strip_ansi(caps[4].split("\x1b[H")[-1]))
+        home_after_deep = strip_ansi(caps[5].split("\x1b[H")[-1])
+        self.assertIn("1 · Ready", home_after_deep)
+        self.assertIn("removed 1 index", home_after_deep)
+        self.assertIn("Pruned 1 stale index", strip_ansi(caps[7].split("\x1b[H")[-1]))
+
+        self.assertFalse((acp / "conversations" / f"{del_old[0]}.db").exists())
+        self.assertFalse(f_cd.exists())
+        sc = sqlite3.connect(acp / "conversation_summaries.db")
+        self.assertEqual(sc.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
+        sc.close()
+
+    def test_tui_busy_skips_summaries_then_refresh_and_error_result_screen(self):
+        # Part A: T3 running (statev2.sqlite open) -> Deep clean honestly skips summaries.db,
+        # returns to menu; once T3 exits, pressing 'r' unlocks Prune index right inside the same TUI!
+        t = self.root / "t_tui_busy"
+        acps, del_ids = make_fixture(t, del_sizes=(4096,), del_age_hours=2.0)
+        state_db = t / "userdata" / "statev2.sqlite"
+
+        holder = subprocess.Popen(
+            [sys.executable, "-c", f"import sys, time; f = open({str(state_db)!r}, 'rb'); print('READY', flush=True); time.sleep(30)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "READY")
+
+            def stop_holder(_proc, _master):
+                holder.terminate()
+                holder.wait(timeout=3)
+
+            rc, caps = run_pty(
+                [str(SCRIPT), "--t3-home", str(t), "--lang", "en"],
+                self.env,
+                cols=92,
+                rows=26,
+                steps=[
+                    (b"\r", "T3 running: 1 matching index row(s) kept"),  # Deep clean -> Confirm shows T3 running notice
+                    (b"y", "1 · T3 running"),                             # Trash file only -> Main Menu (1 · T3 running)
+                    stop_holder,                                          # Quit T3
+                    (b"r", "1 · Ready"),                                  # Live refresh -> Prune index becomes Ready
+                    (b"\x1b[A\x1b[A\r", "Prune ~1 stale index"),          # Move from Details (4) up 2 to Prune index (2) -> Confirm
+                    (b"y", "Pruned 1 stale index"),                       # Prune index -> refreshed Main Menu (Clean)
+                    b"q",                                                 # Quit
+                ],
+            )
+        finally:
+            if holder.poll() is None:
+                holder.terminate()
+                holder.wait(timeout=3)
+            holder.stdout.close()
+            holder.stderr.close()
+
+        self.assertEqual(rc, 0)
+        self.assertIn("T3 running: 1 matching index row(s) kept", strip_ansi(caps[1].split("\x1b[H")[-1]))
+        self.assertIn("1 · T3 running", strip_ansi(caps[2].split("\x1b[H")[-1]))
+        self.assertIn("1 · Ready", strip_ansi(caps[4].split("\x1b[H")[-1]))
+        self.assertIn("Pruned 1 stale index", strip_ansi(caps[6].split("\x1b[H")[-1]))
+        self.assertFalse((acps[0] / "conversations" / f"{del_ids[0]}.db").exists())
+        sc = sqlite3.connect(acps[0] / "conversation_summaries.db")
+        self.assertEqual(sc.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
+        sc.close()
+
+        # Part B: Runtime failure in TUI shows aligned Cleanup Result screen, returns to menu on Enter,
+        # and exits 1 when user quits.
+        t_err = self.root / "t_tui_err"
+        acps_e, del_e = make_fixture(t_err, del_sizes=(4096,), del_age_hours=72.0)
+        fail_stub = make_stub_trash(self.root / "bin", self.trash_dir, fail=True)
+        rc_e, caps_e = run_pty(
+            [str(SCRIPT), "--t3-home", str(t_err), "--skip-lsof", "--lang", "en"],
+            {**self.env, "T3_CLEAN_TRASH_BIN": str(fail_stub)},
+            cols=74,
+            rows=24,
+            steps=[
+                (b"\r", "Confirm Cleanup"),     # Standard clean -> Confirm
+                (b"y", "Cleanup Failed"),       # Execute -> trash fails -> Cleanup Failed result screen
+                (b"\r", "encountered error"),   # Dismiss result screen -> back to Main Menu
+                b"q",                           # Quit -> exit 1
+            ],
+        )
+        self.assertEqual(rc_e, 1)
+        self.assertIn("Cleanup Failed", strip_ansi(caps_e[2].split("\x1b[H")[-1]))
+        self.assertBoxAligned(caps_e[2], 74, "result-err-74-en")
+        self.assertIn("encountered error", strip_ansi(caps_e[3].split("\x1b[H")[-1]))
+        self.assertTrue((acps_e[0] / "conversations" / f"{del_e[0]}.db").exists())
 
 
 if __name__ == "__main__":

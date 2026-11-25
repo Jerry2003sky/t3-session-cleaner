@@ -31,10 +31,10 @@ When you delete a conversation in T3 Code, T3 soft-deletes the thread in `statev
 ## Highlights
 
 - **Single file, zero dependencies** — pure Python 3 standard library + built-in macOS tools (`/usr/bin/trash`, `lsof`, `ps`).
-- **Interactive TUI & scriptable CLI** — visual storage breakdown, per-session multi-select picker, live rescan (`r`), and one-key English / 中文 toggle (`l`).
+- **Interactive TUI & scriptable CLI** — visual storage breakdown, per-session multi-select picker, auto-refreshing dashboard after each cleanup, live rescan (`r`), and one-key English / 中文 toggle (`l`).
 - **Fail-closed safety model** — refuses to run on unknown T3 database schemas, protects active/archived/subagent/in-flight sessions, enforces a 24h cooldown, and re-checks state right before touching disk.
 - **One-click reversible Trash bundle** — moves cleaned files into a single dated folder in macOS Trash along with `manifest.json` and a conflict-safe `restore.sh`.
-- **Opt-in index pruning** — leaves `conversation_summaries.db` untouched by default; only prunes when explicitly requested while T3 & `agy` are fully closed, after saving a consistent WAL-merged backup + merge-safe `restore.sh` to Trash.
+- **Safe index syncing** — when T3 & `agy` are completely closed, TUI session cleanups automatically remove only the matching `conversation_summaries.db` rows for the sessions being cleaned (leaving pre-existing stale entries to the dedicated **Prune index** action; toggleable via `p`, always skipped when T3 is running, and opt-in via `--prune-summaries` in CLI mode), after verifying the table contract and saving a consistent WAL-merged backup + merge-safe `restore.sh` to Trash.
 
 ## Quick Install
 
@@ -64,6 +64,7 @@ Running `t3-clean-agy` inside a TTY opens the interactive dashboard, where you c
 | --- | --- |
 | `↑` / `↓` or `j` / `k` | Move cursor |
 | `Space` | Toggle session selection (in manual picker) |
+| `p` | Toggle syncing `conversation_summaries.db` (in manual picker / confirmation screen when T3 is closed) |
 | `Enter` | Confirm / open view |
 | `r` | Live rescan disk & T3 running status (e.g. right after quitting T3 to prune the index) |
 | `l` | Toggle English / 中文 live (saved to `~/.config/t3-clean-agy/config.json`; auto-detected from locale on first run) |
@@ -100,9 +101,9 @@ Run `t3-clean-agy --help` for all flags.
 2. **Circuit breaker**: Aborts if T3 reports live Antigravity threads and sessions exist on disk, yet zero match the active whitelist.
 3. **Wide whitelist, narrow deletion**: Protects active + archived threads, BFS-expanded nested native subagents, in-flight handoffs/transfers/outbox entries, `ANTIGRAVITY_CONVERSATION_ID`, open `lsof` handles, and a 24-hour cooldown window (computed from the later of T3 `deleted_at` and file `mtime`).
 4. **TOCTOU re-check**: Re-verifies T3 state, category, `mtime`, cooldown, and open handles right before touching disk.
-5. **Restorable Trash bundle & opt-in DB prune**:
-   - Standard/Deep clean only moves session files into **one dated folder** in macOS Trash via `/usr/bin/trash`, bundled with `manifest.json` and a non-overwriting UUID-grouped `restore.sh` (rolls back on failure; preserves staging bundle with `restore.sh` if any rollback fails).
-   - `conversation_summaries.db` is **never touched by default**. Only when explicitly requested (`Prune index` / `--prune-summaries`) — and only when T3 (`statev2.sqlite`) and `agy` are completely closed and no `.t3-clean-staging` leftover exists — does it verify the single-table/no-trigger/no-FK contract, back up a consistent WAL-merged snapshot (+ merge-safe `restore.sh`) to Trash, then `DELETE` + `VACUUM`.
+5. **Restorable Trash bundle & safe DB syncing**:
+   - File cleanup moves session files into **one dated folder** in macOS Trash via `/usr/bin/trash`, bundled with `manifest.json` and a non-overwriting UUID-grouped `restore.sh` (rolls back on failure; preserves staging bundle with `restore.sh` if any rollback fails).
+   - `conversation_summaries.db` is **never touched while T3 (`statev2.sqlite`) or `agy` is running** or when `.t3-clean-staging` leftovers exist. In CLI mode (`--apply`), DB pruning is strictly opt-in (`--prune-summaries`); in interactive TUI mode, when T3 is completely closed and no staging leftover exists, session cleanups automatically remove only the matching rows for the sessions cleaned in that run (explicitly displayed and toggleable with `p` on the confirmation screen; pre-existing stale rows stay untouched for the dedicated **Prune index** action). Before any `DELETE` + `VACUUM`, it verifies the single-table/no-trigger/no-FK contract and backs up a consistent WAL-merged snapshot (+ merge-safe `restore.sh`) to Trash.
    - **Index pruning scope**: A row in `conversation_summaries.db` is pruned only if it is not active, has no backing files on disk, **and** satisfies at least one of: (a) marked deleted/superseded in T3 (including recursively expanded subagents of deleted threads), (b) an empty shell row (`step_count = 0` and empty `title`, e.g. T3 `t3-antigravity-setup-*` probe entries), or (c) its session was successfully cleaned during this run.
 
 ## Restoring a Cleaned Bundle

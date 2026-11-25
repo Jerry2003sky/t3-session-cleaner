@@ -11,9 +11,11 @@ Design invariants (fail-closed):
      handoffs/transfers/outbox, open lsof handles, cooldown window) + narrow
      evidence-based deletion.
   4. Real-time re-verification right before touching disk (prevents TOCTOU races).
-  5. Default cleanup is pure file-only bundled Trash (manifest.json + restore.sh);
-     conversation_summaries.db is only mutated on explicit request with schema
-     verification and a consistent WAL-merged snapshot backup in Trash.
+  5. Default CLI cleanup is pure file-only bundled Trash (manifest.json +
+     restore.sh); conversation_summaries.db is only mutated when requested
+     (--prune-summaries in CLI, or synced in TUI when T3 is completely closed,
+     with per-run toggle) after schema verification and a consistent WAL-merged
+     snapshot backup in Trash.
 """
 
 from __future__ import annotations
@@ -109,8 +111,10 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "staging_warn_plain": "发现残留暂存项：{path}（请先检查内容，勿直接删除）",
         "act_std": "标准清理",
         "act_std_desc": "清理已删对话 (>{h}h)",
+        "act_std_desc_idx": "已删对话 (>{h}h) 及对应索引",
         "act_deep": "彻底清理",
         "act_deep_desc": "全部已删对话与旧版会话",
+        "act_deep_desc_idx": "全部已删、旧版会话及对应索引",
         "act_idx": "清理索引",
         "act_idx_desc": "移除 summaries.db 失效记录",
         "act_idx_need_quit": "{n} 条 · 需退出 T3",
@@ -147,8 +151,10 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "notice_refresh_err": "刷新失败：{err}",
         "v_custom_title": "自定义勾选",
         "v_custom_selected": "已选 {n} 项 ({sz})",
-        "v_custom_idx_on": "失效索引: 开 ({n})",
-        "v_custom_idx_off": "失效索引: 关 ({n})",
+        "v_custom_idx_on": "同步删索引: 开 ({n})",
+        "v_custom_idx_off": "同步删索引: 关 ({n})",
+        "v_custom_idx_busy": "同步删索引: T3 运行中",
+        "v_custom_idx_staging": "同步删索引: 暂存阻断",
         "v_custom_empty": "当前没有非活跃会话，按 s 可查看活跃会话",
         "v_details_title": "全部本地会话",
         "v_details_empty": "当前没有任何 Antigravity 本地会话",
@@ -158,9 +164,23 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_confirm_sub_perm": "不可恢复 · 下一步需输入 DELETE",
         "v_confirm_body": "即将清理 {n} 个会话，预计释放 {sz}",
         "v_confirm_idx": "同步清理 summaries.db 约 {n} 条失效索引（先备份至废纸篓）",
+        "v_confirm_idx_matched": "同步清理对应的 {n} 条 summaries.db 索引（先备份至废纸篓）",
+        "v_confirm_idx_off": "暂不清理对应的 {n} 条 summaries.db 索引（按 p 开启）",
+        "v_confirm_idx_busy": "T3 运行中，暂不清理对应的 {n} 条索引（退出 T3 后可清理）",
+        "v_confirm_idx_staging": "存在暂存残留，暂不清理对应的 summaries.db 索引",
         "v_confirm_ok": "确认清理并打包移入废纸篓",
         "v_confirm_ok_perm": "确认永久删除（下一步需输入 DELETE）",
         "v_confirm_cancel": "取消，返回主菜单",
+        "v_result_title_warn": "清理完成（含提示）",
+        "v_result_title_err": "清理出现异常",
+        "k_back_home": "返回主菜单",
+        "notice_done_trash": "已移入废纸篓 {n} 个会话，释放 {sz}。",
+        "notice_done_perm": "已永久删除 {n} 个会话，释放 {sz}。",
+        "notice_done_trash_idx": "已移入废纸篓 {n} 个会话 ({sz})，并同步清理 {r} 条索引。",
+        "notice_done_perm_idx": "已永久删除 {n} 个会话 ({sz})，并同步清理 {r} 条索引。",
+        "notice_done_idx": "已清理 {r} 条失效索引（原库已备份至废纸篓）。",
+        "notice_done_warn": "清理已完成，存在提示或跳过项（已刷新状态）。",
+        "notice_done_err": "清理过程中出现错误（已刷新状态）。",
         "col_status": "状态",
         "col_id": "ID",
         "col_size": "大小",
@@ -262,8 +282,10 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "staging_warn_plain": "Leftover staging item: {path} (inspect contents first; do not delete directly)",
         "act_std": "Standard clean",
         "act_std_desc": "Clean deleted sessions (>{h}h)",
+        "act_std_desc_idx": "Deleted (>{h}h) & its index",
         "act_deep": "Deep clean",
         "act_deep_desc": "All deleted & superseded sessions",
+        "act_deep_desc_idx": "Deleted, superseded & own index",
         "act_idx": "Prune index",
         "act_idx_desc": "Remove stale entries in summaries.db",
         "act_idx_need_quit": "{n} entries · Quit T3",
@@ -300,8 +322,10 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "notice_refresh_err": "Refresh failed: {err}",
         "v_custom_title": "Select Sessions",
         "v_custom_selected": "Selected {n} ({sz})",
-        "v_custom_idx_on": "Stale index: ON ({n})",
-        "v_custom_idx_off": "Stale index: OFF ({n})",
+        "v_custom_idx_on": "Sync index: ON ({n})",
+        "v_custom_idx_off": "Sync index: OFF ({n})",
+        "v_custom_idx_busy": "Sync index: T3 running",
+        "v_custom_idx_staging": "Sync index: staging",
         "v_custom_empty": "No inactive sessions. Press s to view active sessions.",
         "v_details_title": "All Local Sessions",
         "v_details_empty": "No Antigravity sessions found on disk.",
@@ -311,9 +335,23 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_confirm_sub_perm": "Irreversible · Next step requires typing DELETE",
         "v_confirm_body": "Ready to clean {n} session(s), freeing {sz}",
         "v_confirm_idx": "Prune ~{n} stale index entries in summaries.db (backed up)",
+        "v_confirm_idx_matched": "Also remove {n} matching summaries.db entry(ies) (backed up)",
+        "v_confirm_idx_off": "Skip {n} matching summaries.db entry(ies) (press p to enable)",
+        "v_confirm_idx_busy": "T3 running: {n} matching index row(s) kept (quit T3 to prune)",
+        "v_confirm_idx_staging": "Staging leftover: matching summaries.db rows kept",
         "v_confirm_ok": "Move bundled folder to Trash",
         "v_confirm_ok_perm": "Delete permanently (type DELETE next)",
         "v_confirm_cancel": "Cancel and go back",
+        "v_result_title_warn": "Cleanup Completed with Notices",
+        "v_result_title_err": "Cleanup Failed",
+        "k_back_home": "Back to menu",
+        "notice_done_trash": "Moved {n} session(s) to Trash, freed {sz}.",
+        "notice_done_perm": "Permanently deleted {n} session(s), freed {sz}.",
+        "notice_done_trash_idx": "Moved {n} session(s) ({sz}) · removed {r} index.",
+        "notice_done_perm_idx": "Deleted {n} session(s) ({sz}) · removed {r} index.",
+        "notice_done_idx": "Pruned {r} stale index entry(ies) (backup in Trash).",
+        "notice_done_warn": "Cleanup finished with notices (refreshed).",
+        "notice_done_err": "Cleanup encountered error(s) (refreshed).",
         "col_status": "Status",
         "col_id": "ID",
         "col_size": "Size",
@@ -544,6 +582,19 @@ class ProfileReport:
     lsof_error: Optional[str] = None
     t3_db_open: bool = False
     t3_lsof_error: Optional[str] = None
+
+
+@dataclass
+class CleanupOutcome:
+    exit_code: int = 0
+    cleaned_count: int = 0
+    cleaned_bytes: int = 0
+    pruned_rows: int = 0
+    has_warnings: bool = False
+    has_errors: bool = False
+    stdout_lines: List[str] = field(default_factory=list)
+    stderr_lines: List[str] = field(default_factory=list)
+    display_items: List[Tuple[str, str]] = field(default_factory=list)
 
 
 # ------------------------- Terminal styling & layout -------------------------
@@ -1685,18 +1736,24 @@ def find_prunable_summary_ids(
     deleted_ids: Set[str],
     superseded_ids: Set[str],
     cleaned_this_run: Set[str] = frozenset(),
+    only_cleaned: bool = False,
 ) -> List[str]:
     """Q01 narrowed rule: inactive, absent from disk, and backed by T3 evidence, empty shell, or just cleaned."""
     out: List[str] = []
     for cid, row in summaries.items():
         if cid in active_ids or cid in disk_ids:
             continue
-        if cid in deleted_ids or cid in superseded_ids or cid in cleaned_this_run or row.is_empty_shell:
+        if only_cleaned:
+            if cid in cleaned_this_run:
+                out.append(cid)
+        elif cid in deleted_ids or cid in superseded_ids or cid in cleaned_this_run or row.is_empty_shell:
             out.append(cid)
     return sorted(out)
 
 
-def estimate_pruned_summaries(reports: Sequence[ProfileReport], chosen: Sequence[SessionRecord]) -> int:
+def estimate_pruned_summaries(
+    reports: Sequence[ProfileReport], chosen: Sequence[SessionRecord], *, only_cleaned: bool = False
+) -> int:
     chosen_by_acp: Dict[Path, Set[str]] = {}
     for s in chosen:
         chosen_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
@@ -1704,7 +1761,7 @@ def estimate_pruned_summaries(reports: Sequence[ProfileReport], chosen: Sequence
     for rep in reports:
         if rep.staging_leftovers:
             continue
-        ids = set(rep.orphan_summary_ids)
+        ids = set() if only_cleaned else set(rep.orphan_summary_ids)
         ids.update(uid for uid in chosen_by_acp.get(rep.acp_dir, ()) if uid in rep.summary_ids)
         total += len(ids)
     return total
@@ -2135,11 +2192,14 @@ class RawTerminalSession:
 
 
 def tui_per_session_selector(
-    reports: List[ProfileReport], args: argparse.Namespace, st: Style, tr: Translator
+    reports: List[ProfileReport], snap: MenuSnapshot, args: argparse.Namespace, st: Style, tr: Translator
 ) -> Optional[Tuple[List[SessionRecord], bool]]:
     all_sessions = [s for rep in reports for s in rep.sessions]
     checked: Set[Tuple[Path, str]] = {(s.acp_dir, s.uuid) for s in all_sessions if s.selected}
-    prune_summaries = args.prune_summaries
+    can_prune_any = (not snap.profiles_busy) and any(
+        r.summaries_db_exists and not r.staging_leftovers for r in reports
+    )
+    prune_summaries = can_prune_any
     show_active = args.verbose
     cursor = 0
     now = time.time()
@@ -2151,21 +2211,29 @@ def tui_per_session_selector(
         inner_w = width - 6
         term_rows = max(18, shutil.get_terminal_size((92, 24)).lines)
 
-        footer_lines = format_footer_lines(
-            st,
-            [
-                ("↑↓", tr("k_move")), ("Space", tr("k_toggle")), ("a", tr("k_all_del")),
-                ("n", tr("k_none")), ("s", tr("k_hide_act") if show_active else tr("k_show_act")),
-                ("p", tr("k_idx")), ("l", tr("k_lang")), ("Enter", tr("k_next")), ("Esc", tr("k_back")),
-            ],
-            width, margin="    ",
-        )
+        footer_pairs = [
+            ("↑↓", tr("k_move")), ("Space", tr("k_toggle")), ("a", tr("k_all_del")),
+            ("n", tr("k_none")), ("s", tr("k_hide_act") if show_active else tr("k_show_act")),
+        ]
+        if can_prune_any:
+            footer_pairs.append(("p", tr("k_idx")))
+        footer_pairs.extend([("l", tr("k_lang")), ("Enter", tr("k_next")), ("Esc", tr("k_back"))])
+        footer_lines = format_footer_lines(st, footer_pairs, width, margin="    ")
         max_list_lines = max(5, term_rows - 12 - len(footer_lines))
         chosen_objs = [s for s in all_sessions if (s.acp_dir, s.uuid) in checked]
-        est_idx = estimate_pruned_summaries(reports, chosen_objs)
+        est_idx = estimate_pruned_summaries(reports, chosen_objs, only_cleaned=True)
 
         start = max(0, min(cursor - max_list_lines // 2, len(rows) - max_list_lines)) if len(rows) > max_list_lines else 0
         end = min(len(rows), start + max_list_lines)
+
+        if snap.profiles_busy and snap.any_summaries_db:
+            idx_badge = st.subtle(tr("v_custom_idx_busy"))
+        elif not can_prune_any and snap.any_summaries_db:
+            idx_badge = st.subtle(tr("v_custom_idx_staging"))
+        elif prune_summaries:
+            idx_badge = st.yellow(tr("v_custom_idx_on", n=est_idx))
+        else:
+            idx_badge = st.dim(tr("v_custom_idx_off", n=est_idx))
 
         buf = [
             "",
@@ -2178,7 +2246,7 @@ def tui_per_session_selector(
             box_split_row(
                 st,
                 st.accent_bold(tr("v_custom_selected", n=len(chosen_objs), sz=format_bytes(sum(s.size_bytes for s in chosen_objs)))),
-                st.yellow(tr("v_custom_idx_on", n=est_idx)) if prune_summaries else st.dim(tr("v_custom_idx_off", n=est_idx)),
+                idx_badge,
                 inner_w,
             ),
             box_bottom(st, inner_w),
@@ -2251,7 +2319,7 @@ def tui_per_session_selector(
             checked.clear()
         elif k == "s":
             show_active, cursor = not show_active, 0
-        elif k == "p":
+        elif k == "p" and can_prune_any:
             prune_summaries = not prune_summaries
         elif k == "enter":
             return [s for s in all_sessions if (s.acp_dir, s.uuid) in checked], prune_summaries
@@ -2316,15 +2384,25 @@ def tui_view_all_sessions(reports: List[ProfileReport], st: Style, tr: Translato
 
 
 def tui_confirm_cleanup(
-    chosen: List[SessionRecord], *, prune_summaries: bool, orphan_summary_count: int, permanent: bool, st: Style, tr: Translator
-) -> bool:
+    chosen: List[SessionRecord],
+    *,
+    prune_summaries: bool,
+    orphan_summary_count: int,
+    only_cleaned_summaries: bool = False,
+    can_toggle_prune: bool = False,
+    prune_block_reason: Optional[str] = None,
+    permanent: bool,
+    st: Style,
+    tr: Translator,
+) -> Optional[bool]:
     total_bytes = sum(s.size_bytes for s in chosen)
     focus, offset = 1, 0  # default to Cancel to prevent accidental double-Enter
 
     while True:
         width = term_width()
         inner_w = width - 6
-        max_items = max(4, max(18, shutil.get_terminal_size((92, 24)).lines) - 15)
+        body_w = inner_w - 4
+        max_items = max(4, max(18, shutil.get_terminal_size((92, 24)).lines) - 16)
         max_offset = max(0, len(chosen) - max_items)
         offset = max(0, min(offset, max_offset))
 
@@ -2350,8 +2428,21 @@ def tui_confirm_cleanup(
             if (rem := len(chosen) - (offset + max_items)) > 0:
                 buf.append(box_row(st, st.dim(f"  ↓ +{rem}"), inner_w))
 
-        if prune_summaries:
-            buf.append(box_row(st, f"{st.lavender('•')} " + tr("v_confirm_idx", n=st.hi(str(orphan_summary_count))), inner_w))
+        idx_spec: Optional[Tuple[str, object, object]] = None
+        if prune_summaries and orphan_summary_count > 0:
+            idx_key = "v_confirm_idx_matched" if only_cleaned_summaries else "v_confirm_idx"
+            idx_spec = (tr(idx_key, n=str(orphan_summary_count)), st.lavender, lambda x: x)
+        elif can_toggle_prune and orphan_summary_count > 0:
+            idx_spec = (tr("v_confirm_idx_off", n=str(orphan_summary_count)), st.dim, st.dim)
+        elif prune_block_reason == "busy" and orphan_summary_count > 0:
+            idx_spec = (tr("v_confirm_idx_busy", n=str(orphan_summary_count)), st.yellow, st.subtle)
+        elif prune_block_reason == "staging":
+            idx_spec = (tr("v_confirm_idx_staging"), st.yellow, st.subtle)
+        if idx_spec is not None:
+            idx_line, dot_fn, txt_fn = idx_spec
+            for i, wl in enumerate(wrap_display_lines(idx_line, body_w - 2)):
+                pfx = f"{dot_fn('•')} " if i == 0 else "  "
+                buf.append(box_row(st, pfx + txt_fn(wl), inner_w))
         buf.extend([box_bottom(st, inner_w), ""])
 
         opts = ((tr("v_confirm_ok_perm") if permanent else tr("v_confirm_ok"), permanent), (tr("v_confirm_cancel"), False))
@@ -2363,18 +2454,20 @@ def tui_confirm_cleanup(
                 buf.append(f"    {st.subtle(label)}")
 
         buf.append("")
-        buf.extend(format_footer_lines(
-            st,
-            [("↑↓", tr("k_select")), ("Enter", tr("k_confirm")), ("y", tr("k_quick_y")), ("l", tr("k_lang")), ("Esc", tr("k_back"))],
-            width, margin="    ",
-        ))
+        footer_pairs = [("↑↓", tr("k_select")), ("Enter", tr("k_confirm")), ("y", tr("k_quick_y"))]
+        if can_toggle_prune:
+            footer_pairs.append(("p", tr("k_idx")))
+        footer_pairs.extend([("l", tr("k_lang")), ("Esc", tr("k_back"))])
+        buf.extend(format_footer_lines(st, footer_pairs, width, margin="    "))
         paint_screen(buf)
 
         k = read_key()
         if k in ("esc", "q", "n", "ctrl_c"):
-            return False
+            return None
         if k == "l":
             tr.toggle_and_save()
+        elif k == "p" and can_toggle_prune:
+            prune_summaries = not prune_summaries
         elif k in ("up", "down", "left", "right", "j", "k"):
             focus = 1 - focus
         elif k == "pgup":
@@ -2382,9 +2475,74 @@ def tui_confirm_cleanup(
         elif k == "pgdn":
             offset = min(max_offset, offset + max_items)
         elif k == "y":
-            return True
+            return prune_summaries
         elif k == "enter":
-            return focus == 0
+            return prune_summaries if focus == 0 else None
+
+
+def tui_show_cleanup_result(
+    outcome: CleanupOutcome, *, permanent: bool, st: Style, tr: Translator
+) -> None:
+    offset = 0
+    items = outcome.display_items or [("info", tr("no_work"))]
+
+    while True:
+        width = term_width()
+        inner_w = width - 6
+        body_w = inner_w - 4
+        term_rows = max(18, shutil.get_terminal_size((92, 24)).lines)
+
+        rendered: List[str] = []
+        for kind, msg in items:
+            wrapped = wrap_display_lines(msg, max(12, body_w - 2))
+            for idx, wl in enumerate(wrapped):
+                if kind == "ok":
+                    rendered.append((st.green("✓ ") if idx == 0 else "  ") + wl)
+                elif kind == "warn":
+                    rendered.append((st.yellow("⚠ ") if idx == 0 else "  ") + st.yellow(wl))
+                elif kind == "err":
+                    rendered.append((st.bold_red("✗ ") if idx == 0 else "  ") + st.red(wl))
+                else:
+                    rendered.append("  " + st.subtle(wl))
+
+        max_lines = max(5, term_rows - 11)
+        max_offset = max(0, len(rendered) - max_lines)
+        offset = max(0, min(offset, max_offset))
+
+        is_err = outcome.has_errors or outcome.exit_code != 0
+        h_left = (
+            st.bold_red("◆ " + tr("v_result_title_err")) if is_err
+            else st.yellow("◆ " + tr("v_result_title_warn"))
+        )
+        h_right = st.bold_red(tr("mode_perm")) if permanent else st.subtle(tr("mode_trash_short"))
+        buf = ["", box_top(st, inner_w), box_split_row(st, h_left, h_right, inner_w), box_row(st, "", inner_w)]
+        if offset > 0:
+            buf.append(box_row(st, st.dim(f"  ↑ +{offset}"), inner_w))
+        for line in rendered[offset : offset + max_lines]:
+            buf.append(box_row(st, line, inner_w))
+        if (rem := len(rendered) - (offset + max_lines)) > 0:
+            buf.append(box_row(st, st.dim(f"  ↓ +{rem}"), inner_w))
+        buf.extend([box_bottom(st, inner_w), ""])
+
+        footer_pairs = [("Enter / Esc", tr("k_back_home"))]
+        if max_offset > 0:
+            footer_pairs.insert(0, ("↑↓", tr("k_scroll")))
+        buf.extend(format_footer_lines(st, footer_pairs, width, margin="    "))
+        paint_screen(buf)
+
+        k = read_key()
+        if k == "resize":
+            continue
+        if k in ("enter", "esc", "space", "q", "ctrl_c"):
+            return
+        if k in ("up", "k"):
+            offset = max(0, offset - 1)
+        elif k in ("down", "j"):
+            offset = min(max_offset, offset + 1)
+        elif k == "pgup":
+            offset = max(0, offset - max_lines)
+        elif k == "pgdn":
+            offset = min(max_offset, offset + max_lines)
 
 
 @dataclass
@@ -2439,11 +2597,14 @@ def build_menu_snapshot(reports: Sequence[ProfileReport]) -> MenuSnapshot:
     )
 
 
+def _fmt_items_pair(items: Sequence[SessionRecord], tr: Translator) -> str:
+    return f"{tr('items_cnt', n=len(items))} · {format_bytes(sum(s.size_bytes for s in items))}"
+
+
 def _render_home_card(
     snap: MenuSnapshot, h_str: str, permanent: bool, inner_w: int, st: Style, tr: Translator
 ) -> List[str]:
     body_w = inner_w - 4
-    fmt_pair = lambda items: f"{tr('items_cnt', n=len(items))} · {format_bytes(sum(s.size_bytes for s in items))}"
 
     mode_badge = (
         st.bold_red(tr("mode_perm")) if permanent
@@ -2496,26 +2657,26 @@ def _render_home_card(
         n_idx = snap.prunable_orphan_cnt
         staging_blocked = snap.orphan_summary_cnt > 0 and n_idx == 0
         if staging_blocked:
-            idx_state, idx_val, idx_style = tr("idx_staging"), f"{snap.orphan_summary_cnt} · {tr('idx_staging')}", st.subtle
+            idx_val, idx_style = f"{snap.orphan_summary_cnt} · {tr('idx_staging')}", st.subtle
         elif n_idx > 0 and snap.profiles_busy:
-            idx_state, idx_val, idx_style = tr("idx_busy"), f"{n_idx} · {tr('idx_busy')}", st.subtle
+            idx_val, idx_style = f"{n_idx} · {tr('idx_busy')}", st.subtle
         elif n_idx > 0:
-            idx_state, idx_val, idx_style = tr("idx_ready"), f"{n_idx} · {tr('idx_ready')}", st.lavender
+            idx_val, idx_style = f"{n_idx} · {tr('idx_ready')}", st.lavender
         else:
-            idx_state, idx_val, idx_style = tr("idx_clean"), tr("idx_clean"), None
+            idx_val, idx_style = tr("idx_clean"), None
         idx_cell = flex_metric_cell(st, tr("m_index"), idx_val, right_w, idx_style)
 
     metric_rows = (
         (
-            flex_metric_cell(st, tr("m_del_old", h=h_str), fmt_pair(snap.del_old), half_w, st.yellow if snap.del_old else None),
-            flex_metric_cell(st, tr("m_active"), fmt_pair(snap.active), right_w, st.green if snap.active else None),
+            flex_metric_cell(st, tr("m_del_old", h=h_str), _fmt_items_pair(snap.del_old, tr), half_w, st.yellow if snap.del_old else None),
+            flex_metric_cell(st, tr("m_active"), _fmt_items_pair(snap.active, tr), right_w, st.green if snap.active else None),
         ),
         (
-            flex_metric_cell(st, tr("m_del_new", h=h_str), fmt_pair(snap.del_recent), half_w, st.yellow if snap.del_recent else None),
-            flex_metric_cell(st, tr("m_super"), fmt_pair(snap.superseded), right_w, st.lavender if snap.superseded else None),
+            flex_metric_cell(st, tr("m_del_new", h=h_str), _fmt_items_pair(snap.del_recent, tr), half_w, st.yellow if snap.del_recent else None),
+            flex_metric_cell(st, tr("m_super"), _fmt_items_pair(snap.superseded, tr), right_w, st.lavender if snap.superseded else None),
         ),
         (
-            flex_metric_cell(st, tr("m_unknown"), fmt_pair(snap.unknown), half_w, st.cyan if snap.unknown else None),
+            flex_metric_cell(st, tr("m_unknown"), _fmt_items_pair(snap.unknown, tr), half_w, st.cyan if snap.unknown else None),
             idx_cell,
         ),
     )
@@ -2530,6 +2691,41 @@ def _render_home_card(
     return buf
 
 
+def can_prune_summaries_now(
+    reports: Sequence[ProfileReport], snap: MenuSnapshot, chosen: Sequence[SessionRecord], *, only_cleaned: bool = False
+) -> Tuple[bool, int, Optional[str]]:
+    est_orphans = estimate_pruned_summaries(reports, chosen, only_cleaned=only_cleaned)
+    if est_orphans > 0:
+        return (False, est_orphans, "busy") if snap.profiles_busy else (True, est_orphans, None)
+    chosen_by_acp: Dict[Path, Set[str]] = {}
+    for s in chosen:
+        chosen_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
+    has_staging_blocked = any(
+        rep.staging_leftovers and (
+            (not only_cleaned and bool(rep.orphan_summary_ids))
+            or any(uid in rep.summary_ids for uid in chosen_by_acp.get(rep.acp_dir, ()))
+        )
+        for rep in reports
+    )
+    return (False, 0, "staging") if has_staging_blocked else (False, 0, None)
+
+
+def _summarize_cleanup_notice(outcome: CleanupOutcome, permanent: bool, tr: Translator) -> Tuple[str, str]:
+    if outcome.has_errors or outcome.exit_code != 0:
+        return ("warn", tr("notice_done_err"))
+    if outcome.has_warnings:
+        return ("warn", tr("notice_done_warn"))
+    if outcome.cleaned_count > 0 and outcome.pruned_rows > 0:
+        key = "notice_done_perm_idx" if permanent else "notice_done_trash_idx"
+        return ("info", tr(key, n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes), r=outcome.pruned_rows))
+    if outcome.cleaned_count > 0:
+        key = "notice_done_perm" if permanent else "notice_done_trash"
+        return ("info", tr(key, n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes)))
+    if outcome.pruned_rows > 0:
+        return ("info", tr("notice_done_idx", r=outcome.pruned_rows))
+    return ("info", tr("no_work"))
+
+
 def run_interactive_menu(
     t3_home: Path, reports: List[ProfileReport], args: argparse.Namespace, st: Style, tr: Translator
 ) -> int:
@@ -2539,7 +2735,6 @@ def run_interactive_menu(
 
     h_str = f"{args.min_age:g}"
     snap = build_menu_snapshot(reports)
-    fmt_pair = lambda items: f"{tr('items_cnt', n=len(items))} · {format_bytes(sum(s.size_bytes for s in items))}"
 
     def build_menu_items() -> List[Tuple[str, str, str, str, bool]]:
         n_idx = snap.prunable_orphan_cnt
@@ -2550,9 +2745,27 @@ def run_interactive_menu(
             idx_stat = tr("act_idx_need_quit", n=n_idx) if snap.profiles_busy else tr("rows_cnt", n=n_idx)
         else:
             idx_stat = "—"
+        std_sync_idx = (
+            not snap.profiles_busy and bool(snap.std_targets)
+            and estimate_pruned_summaries(reports, snap.std_targets, only_cleaned=True) > 0
+        )
+        deep_sync_idx = (
+            not snap.profiles_busy and bool(snap.deep_targets)
+            and estimate_pruned_summaries(reports, snap.deep_targets, only_cleaned=True) > 0
+        )
         return [
-            ("std", tr("act_std"), tr("act_std_desc", h=h_str), fmt_pair(snap.std_targets) if snap.std_targets else "—", bool(snap.std_targets)),
-            ("deep", tr("act_deep"), tr("act_deep_desc"), fmt_pair(snap.deep_targets) if snap.deep_targets else "—", bool(snap.deep_targets)),
+            (
+                "std", tr("act_std"),
+                tr("act_std_desc_idx" if std_sync_idx else "act_std_desc", h=h_str),
+                _fmt_items_pair(snap.std_targets, tr) if snap.std_targets else "—",
+                bool(snap.std_targets),
+            ),
+            (
+                "deep", tr("act_deep"),
+                tr("act_deep_desc_idx" if deep_sync_idx else "act_deep_desc"),
+                _fmt_items_pair(snap.deep_targets, tr) if snap.deep_targets else "—",
+                bool(snap.deep_targets),
+            ),
             ("summaries", tr("act_idx"), tr("act_idx_desc"), idx_stat, n_idx > 0 and not snap.profiles_busy),
             ("custom", tr("act_custom"), tr("act_custom_desc"), "", True),
             ("details", tr("act_details"), tr("act_details_desc"), tr("items_cnt", n=len(snap.all_sessions)), True),
@@ -2561,157 +2774,248 @@ def run_interactive_menu(
 
     cursor = next((i for i, item in enumerate(build_menu_items()[:3]) if item[4]), 4)
     status_notice: Optional[Tuple[str, str]] = None
-    final_action: Optional[Tuple[List[SessionRecord], bool]] = None
+    session_stdout: List[str] = []
+    session_stderr: List[str] = []
+    executed_any = False
+    last_rc = 0
+    pending_result: Optional[CleanupOutcome] = None
 
-    with RawTerminalSession():
-        while True:
-            menu_items = build_menu_items()
-            width = term_width()
-            inner_w = width - 6
-            body_w = inner_w - 4
+    def flush_session_logs() -> None:
+        for line in session_stdout:
+            print(line)
+        for line in session_stderr:
+            print(line, file=sys.stderr)
 
-            buf = _render_home_card(snap, h_str, args.permanent, inner_w, st, tr)
-            buf.append("")
+    def reload_plan() -> None:
+        nonlocal reports, snap
+        _, reports = build_plan(
+            t3_home, include_superseded=args.include_superseded,
+            include_unknown=args.include_unknown, min_age_hours=args.min_age, skip_lsof=args.skip_lsof,
+        )
+        snap = build_menu_snapshot(reports)
 
-            name_w = max(display_width(item[1]) for item in menu_items)
-            for idx, (key, name, desc, stat_txt, actionable) in enumerate(menu_items):
-                if key == "details":
-                    buf.append("")
-                is_cur = idx == cursor
-                is_cleanup_stat = key in ("std", "deep", "summaries") and actionable
-                name_pad = pad_right(name, name_w)
-                sw = display_width(stat_txt)
-                desc_str = truncate_width(desc, max(8, body_w - name_w - 3 - (sw + 2 if sw else 0))) if desc else ""
-                gap = " " * max(2, body_w - name_w - (3 + display_width(desc_str) if desc_str else 0) - sw)
+    def run_and_refresh(
+        chosen: List[SessionRecord], do_prune: bool, only_cleaned: bool, permanent: bool
+    ) -> Tuple[Optional[CleanupOutcome], Optional[int]]:
+        nonlocal cursor, status_notice, executed_any, last_rc
+        outcome = _run_cleanup(
+            t3_home, reports, chosen, prune_summaries=do_prune, prune_only_cleaned=only_cleaned,
+            permanent=permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
+        )
+        executed_any = True
+        session_stdout.extend(outcome.stdout_lines)
+        session_stderr.extend(outcome.stderr_lines)
+        last_rc = outcome.exit_code
+        if outcome.exit_code == 2:
+            return None, 2
+        status_notice = _summarize_cleanup_notice(outcome, permanent, tr)
+        try:
+            reload_plan()
+            refreshed = build_menu_items()
+            if cursor >= len(refreshed) or not refreshed[cursor][4]:
+                cursor = next((i for i, item in enumerate(refreshed[:3]) if item[4]), 4)
+        except ContractError as exc:
+            session_stderr.append(f"{st.bold_red('ERROR (fail-closed): ')}{exc}")
+            return None, 2
+        except Exception as exc:
+            status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
+        show_res = outcome if (outcome.has_warnings or outcome.has_errors or outcome.exit_code != 0) else None
+        return show_res, None
 
-                if not is_cur and not actionable:
-                    buf.append(f"     {st.dim(name_pad + (f'   {desc_str}' if desc_str else '') + gap + stat_txt)}")
-                    continue
+    while True:
+        pending_perm_action: Optional[Tuple[List[SessionRecord], bool, bool]] = None
+        fatal_rc: Optional[int] = None
 
-                s_col = (
-                    st.green(stat_txt) if is_cleanup_stat
-                    else (st.subtle(stat_txt) if (is_cur and stat_txt and stat_txt != "—") else st.dim(stat_txt))
-                )
-                if is_cur:
-                    ptr = st.accent("❯ ") if not actionable else st.accent_bold("❯ ")
-                    n_col = st.accent(name_pad) if not actionable else st.accent_bold(name_pad)
-                    d_col = f"   {(st.dim if not actionable else st.subtle)(desc_str)}" if desc_str else ""
-                    buf.append(f"   {ptr}{n_col}{d_col}{gap}{s_col}")
-                else:
-                    n_col = st.subtle(name_pad) if key == "quit" else st.soft(name_pad)
-                    d_col = f"   {st.dim(desc_str)}" if desc_str else ""
-                    buf.append(f"     {n_col}{d_col}{gap}{s_col}")
+        with RawTerminalSession():
+            if pending_result is not None:
+                tui_show_cleanup_result(pending_result, permanent=args.permanent, st=st, tr=tr)
+                pending_result = None
 
-            buf.append("")
-            if status_notice:
-                n_kind, n_msg = status_notice
-                buf.append(f"     {(st.green('✓ ' + n_msg) if n_kind == 'info' else st.yellow('⚠ ' + n_msg))}")
-            buf.extend(format_footer_lines(
-                st,
-                [("↑↓", tr("k_move")), ("Enter", tr("k_confirm")), ("r", tr("k_refresh")), ("l", tr("k_lang")), ("Esc", tr("k_quit"))],
-                width, margin="     ",
-            ))
-            paint_screen(buf)
+            while True:
+                menu_items = build_menu_items()
+                width = term_width()
+                inner_w = width - 6
+                body_w = inner_w - 4
 
-            k = read_key()
-            if k == "resize":
-                continue
-            status_notice = None
-            if k in ("esc", "q", "ctrl_c"):
-                break
-            if k == "l":
-                tr.toggle_and_save()
-                continue
-            if k == "r":
-                try:
-                    _, reports = build_plan(
-                        t3_home, include_superseded=args.include_superseded,
-                        include_unknown=args.include_unknown, min_age_hours=args.min_age, skip_lsof=args.skip_lsof,
+                buf = _render_home_card(snap, h_str, args.permanent, inner_w, st, tr)
+                buf.append("")
+
+                name_w = max(display_width(item[1]) for item in menu_items)
+                for idx, (key, name, desc, stat_txt, actionable) in enumerate(menu_items):
+                    if key == "details":
+                        buf.append("")
+                    is_cur = idx == cursor
+                    is_cleanup_stat = key in ("std", "deep", "summaries") and actionable
+                    name_pad = pad_right(name, name_w)
+                    sw = display_width(stat_txt)
+                    desc_str = truncate_width(desc, max(8, body_w - name_w - 3 - (sw + 2 if sw else 0))) if desc else ""
+                    gap = " " * max(2, body_w - name_w - (3 + display_width(desc_str) if desc_str else 0) - sw)
+
+                    if not is_cur and not actionable:
+                        buf.append(f"     {st.dim(name_pad + (f'   {desc_str}' if desc_str else '') + gap + stat_txt)}")
+                        continue
+
+                    s_col = (
+                        st.green(stat_txt) if is_cleanup_stat
+                        else (st.subtle(stat_txt) if (is_cur and stat_txt and stat_txt != "—") else st.dim(stat_txt))
                     )
-                    snap = build_menu_snapshot(reports)
-                    status_notice = ("info", tr("notice_refreshed"))
-                except Exception as exc:
-                    status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
-                continue
-            if k in ("up", "k"):
-                cursor = (cursor - 1) % len(menu_items)
-                continue
-            if k in ("down", "j"):
-                cursor = (cursor + 1) % len(menu_items)
-                continue
-            if k != "enter":
-                continue
+                    if is_cur:
+                        ptr = st.accent("❯ ") if not actionable else st.accent_bold("❯ ")
+                        n_col = st.accent(name_pad) if not actionable else st.accent_bold(name_pad)
+                        d_col = f"   {(st.dim if not actionable else st.subtle)(desc_str)}" if desc_str else ""
+                        buf.append(f"   {ptr}{n_col}{d_col}{gap}{s_col}")
+                    else:
+                        n_col = st.subtle(name_pad) if key == "quit" else st.soft(name_pad)
+                        d_col = f"   {st.dim(desc_str)}" if desc_str else ""
+                        buf.append(f"     {n_col}{d_col}{gap}{s_col}")
 
-            action_key = menu_items[cursor][0]
-            if action_key == "quit":
-                break
-            if action_key == "details":
-                tui_view_all_sessions(reports, st, tr)
-                continue
+                buf.append("")
+                if status_notice:
+                    n_kind, n_msg = status_notice
+                    pfx = "✓ " if n_kind == "info" else "⚠ "
+                    color_fn = st.green if n_kind == "info" else st.yellow
+                    for i, wl in enumerate(wrap_display_lines(n_msg, max(20, width - 7))):
+                        buf.append(f"     {color_fn((pfx if i == 0 else '  ') + wl)}")
+                buf.extend(format_footer_lines(
+                    st,
+                    [("↑↓", tr("k_move")), ("Enter", tr("k_confirm")), ("r", tr("k_refresh")), ("l", tr("k_lang")), ("Esc", tr("k_quit"))],
+                    width, margin="     ",
+                ))
+                paint_screen(buf)
 
-            chosen: List[SessionRecord] = []
-            do_prune_summaries = False
-            if action_key == "std":
-                if not snap.std_targets:
-                    status_notice = ("warn", tr("notice_no_std"))
+                k = read_key()
+                if k == "resize":
                     continue
-                chosen, do_prune_summaries = list(snap.std_targets), args.prune_summaries
-            elif action_key == "deep":
-                if not snap.deep_targets:
-                    status_notice = ("warn", tr("notice_no_deep"))
+                status_notice = None
+                if k in ("esc", "q", "ctrl_c"):
+                    break
+                if k == "l":
+                    tr.toggle_and_save()
                     continue
-                chosen, do_prune_summaries = list(snap.deep_targets), args.prune_summaries
-            elif action_key == "summaries":
-                if snap.orphan_summary_cnt == 0:
-                    status_notice = ("warn", tr("notice_idx_clean"))
+                if k == "r":
+                    try:
+                        reload_plan()
+                        status_notice = ("info", tr("notice_refreshed"))
+                    except Exception as exc:
+                        status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
                     continue
-                if snap.prunable_orphan_cnt == 0:
-                    status_notice = ("warn", tr("notice_idx_staging"))
+                if k in ("up", "k"):
+                    cursor = (cursor - 1) % len(menu_items)
                     continue
-                if snap.profiles_busy:
-                    status_notice = ("warn", tr("notice_idx_busy"))
+                if k in ("down", "j"):
+                    cursor = (cursor + 1) % len(menu_items)
                     continue
-                do_prune_summaries = True
-            elif action_key == "custom":
-                res = tui_per_session_selector(reports, args, st, tr)
-                if res is None:
-                    continue
-                chosen, do_prune_summaries = res
-                if not chosen and not do_prune_summaries:
-                    status_notice = ("warn", tr("notice_none_sel"))
+                if k != "enter":
                     continue
 
-            est_orphans = estimate_pruned_summaries(reports, chosen)
-            # R09: -y applies ONLY to CLI --apply mode, never bypasses TUI confirmation.
-            if tui_confirm_cleanup(
-                chosen, prune_summaries=do_prune_summaries, orphan_summary_count=est_orphans,
-                permanent=args.permanent, st=st, tr=tr,
-            ):
-                final_action = (chosen, do_prune_summaries)
-                break
-            status_notice = ("warn", tr("notice_cancelled"))
+                action_key = menu_items[cursor][0]
+                if action_key == "quit":
+                    break
+                if action_key == "details":
+                    tui_view_all_sessions(reports, st, tr)
+                    continue
 
-    if final_action is None:
-        print(tr("exit_clean"))
-        return 0
+                chosen: List[SessionRecord] = []
+                do_prune_summaries = False
+                only_cleaned_summaries = False
+                can_toggle_prune = False
+                prune_block_reason: Optional[str] = None
+                est_orphans = 0
 
-    chosen, do_prune_summaries = final_action
-    if args.permanent:
+                if action_key in ("std", "deep"):
+                    targets = snap.std_targets if action_key == "std" else snap.deep_targets
+                    if not targets:
+                        status_notice = ("warn", tr("notice_no_std" if action_key == "std" else "notice_no_deep"))
+                        continue
+                    chosen = list(targets)
+                    only_cleaned_summaries = True
+                    can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
+                        reports, snap, chosen, only_cleaned=True
+                    )
+                    do_prune_summaries = can_prune
+                    can_toggle_prune = can_prune
+                elif action_key == "summaries":
+                    if snap.orphan_summary_cnt == 0:
+                        status_notice = ("warn", tr("notice_idx_clean"))
+                        continue
+                    if snap.prunable_orphan_cnt == 0:
+                        status_notice = ("warn", tr("notice_idx_staging"))
+                        continue
+                    if snap.profiles_busy:
+                        status_notice = ("warn", tr("notice_idx_busy"))
+                        continue
+                    est_orphans = estimate_pruned_summaries(reports, [])
+                    do_prune_summaries = True
+                elif action_key == "custom":
+                    res = tui_per_session_selector(reports, snap, args, st, tr)
+                    if res is None:
+                        continue
+                    chosen, sel_prune = res
+                    if not chosen:
+                        status_notice = ("warn", tr("notice_none_sel"))
+                        continue
+                    only_cleaned_summaries = True
+                    can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
+                        reports, snap, chosen, only_cleaned=True
+                    )
+                    do_prune_summaries = sel_prune and can_prune
+                    can_toggle_prune = can_prune
+
+                # R09: -y applies ONLY to CLI --apply mode, never bypasses TUI confirmation.
+                confirmed_prune = tui_confirm_cleanup(
+                    chosen,
+                    prune_summaries=do_prune_summaries,
+                    orphan_summary_count=est_orphans,
+                    only_cleaned_summaries=only_cleaned_summaries,
+                    can_toggle_prune=can_toggle_prune,
+                    prune_block_reason=prune_block_reason,
+                    permanent=args.permanent,
+                    st=st,
+                    tr=tr,
+                )
+                if confirmed_prune is None:
+                    status_notice = ("warn", tr("notice_cancelled"))
+                    continue
+
+                if args.permanent:
+                    pending_perm_action = (chosen, confirmed_prune, only_cleaned_summaries)
+                    break
+
+                show_res, fatal_rc = run_and_refresh(chosen, confirmed_prune, only_cleaned_summaries, False)
+                if fatal_rc is not None:
+                    break
+                if show_res is not None:
+                    tui_show_cleanup_result(show_res, permanent=False, st=st, tr=tr)
+
+        if fatal_rc is not None:
+            flush_session_logs()
+            return fatal_rc
+
+        if pending_perm_action is None:
+            if executed_any:
+                flush_session_logs()
+                return last_rc
+            print(tr("exit_clean"))
+            return 0
+
+        chosen, do_prune_summaries, only_cleaned_summaries = pending_perm_action
         confirm_res = confirm_execution(
             chosen, prune_summaries=do_prune_summaries,
-            orphan_summary_count=estimate_pruned_summaries(reports, chosen),
+            orphan_summary_count=estimate_pruned_summaries(reports, chosen, only_cleaned=only_cleaned_summaries),
+            prune_only_cleaned=only_cleaned_summaries,
             permanent=True, assume_yes=False, st=st, tr=tr,
         )
-        if confirm_res != "yes":
-            if confirm_res == "no":
-                print(tr("cancelled"))
-                return 0
+        if confirm_res == "nontty":
+            flush_session_logs()
             return 1
+        if confirm_res != "yes":
+            status_notice = ("warn", tr("notice_cancelled"))
+            continue
 
-    return execute_cleanup(
-        t3_home, reports, chosen, prune_summaries=do_prune_summaries,
-        permanent=args.permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
-    )
+        pending_result, fatal_rc = run_and_refresh(chosen, do_prune_summaries, only_cleaned_summaries, True)
+        if fatal_rc is not None:
+            flush_session_logs()
+            return fatal_rc
 
 
 # ------------------------- Confirmation & Execution -------------------------
@@ -2719,7 +3023,7 @@ def run_interactive_menu(
 
 def confirm_execution(
     chosen: List[SessionRecord], *, prune_summaries: bool, orphan_summary_count: int,
-    permanent: bool, assume_yes: bool, st: Style, tr: Translator
+    permanent: bool, assume_yes: bool, st: Style, tr: Translator, prune_only_cleaned: bool = False,
 ) -> str:
     """Returns 'yes', 'no', or 'nontty'."""
     if assume_yes:
@@ -2735,7 +3039,7 @@ def confirm_execution(
         for s in chosen:
             print(f"    • {st.dim(s.uuid[:8])}  {pad_left(format_bytes(s.size_bytes), 9)}  {truncate_width(session_title(s, tr), 42)}  {st.dim('[' + s.category + ']')}")
     if prune_summaries:
-        print("  " + tr("v_confirm_idx", n=orphan_summary_count))
+        print("  " + tr("v_confirm_idx_matched" if prune_only_cleaned else "v_confirm_idx", n=orphan_summary_count))
 
     try:
         if permanent:
@@ -2746,26 +3050,43 @@ def confirm_execution(
         return "no"
 
 
-def execute_cleanup(
+def _run_cleanup(
     t3_home: Path, reports: List[ProfileReport], chosen: List[SessionRecord], *,
     prune_summaries: bool, permanent: bool, skip_lsof: bool, st: Style, tr: Translator,
-    min_age_hours: float = 24.0,
-) -> int:
+    min_age_hours: float = 24.0, prune_only_cleaned: bool = False,
+) -> CleanupOutcome:
+    out = CleanupOutcome()
+
+    def add_ok(plain: str, styled: Optional[str] = None) -> None:
+        out.stdout_lines.append(f"  {st.green('✓')} {styled if styled is not None else plain}")
+        out.display_items.append(("ok", plain))
+
+    def add_warn(msg: str, *, full_yellow: bool = False) -> None:
+        out.stdout_lines.append(f"  {st.yellow('⚠ ' + msg) if full_yellow else st.yellow('⚠') + ' ' + msg}")
+        out.display_items.append(("warn", msg))
+        out.has_warnings = True
+
+    def add_err(msg: str, *, code: int = 1, prefix: Optional[str] = None) -> None:
+        line = f"{prefix}{msg}" if prefix is not None else f"  {st.bold_red('[ERROR]')} {msg}"
+        out.stderr_lines.append(line)
+        out.display_items.append(("err", msg))
+        out.exit_code = code
+        out.has_errors = True
+
     try:
         approved, blocked = reverify_before_execute(
             t3_home, tr, chosen, skip_lsof=skip_lsof, min_age_hours=min_age_hours
         )
     except ContractError as exc:
-        print(f"{st.bold_red('ERROR (fail-closed): ')}{exc}", file=sys.stderr)
-        return 2
+        add_err(str(exc), code=2, prefix=st.bold_red("ERROR (fail-closed): "))
+        return out
     except Exception as exc:
-        print(f"{st.bold_red('ERROR: ')}{exc}", file=sys.stderr)
-        return 1
+        add_err(str(exc), code=1, prefix=st.bold_red("ERROR: "))
+        return out
 
     for s, reason in blocked:
-        print(f"  {st.yellow('⚠')} " + tr("reverify_blocked", uid=s.uuid[:8], title=session_title(s, tr), reason=reason))
+        add_warn(tr("reverify_blocked", uid=s.uuid[:8], title=session_title(s, tr), reason=reason))
 
-    exit_code, cleaned_count, cleaned_bytes = 0, 0, 0
     any_file_error = False
     cleaned_uuids_by_acp: Dict[Path, Set[str]] = {}
 
@@ -2774,12 +3095,11 @@ def execute_cleanup(
             for s in approved:
                 try:
                     remove_permanently(s.paths)
-                    cleaned_count += 1
-                    cleaned_bytes += s.size_bytes
+                    out.cleaned_count += 1
+                    out.cleaned_bytes += s.size_bytes
                     cleaned_uuids_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
                 except Exception as exc:
-                    print(f"  {st.bold_red('[ERROR]')} {s.uuid}: {exc}", file=sys.stderr)
-                    exit_code = 1
+                    add_err(f"{s.uuid}: {exc}")
                     any_file_error = True
         else:
             by_profile: Dict[Path, List[SessionRecord]] = {}
@@ -2791,41 +3111,27 @@ def execute_cleanup(
                 prof_tag = acp_dir.parent.name[:12]
                 try:
                     bname = trash_profile_bundle(acp_dir, prof_sessions, tr, ts=ts, multi_profile=multi_profile)
-                    cleaned_count += len(prof_sessions)
-                    cleaned_bytes += sum(s.size_bytes for s in prof_sessions)
+                    out.cleaned_count += len(prof_sessions)
+                    out.cleaned_bytes += sum(s.size_bytes for s in prof_sessions)
                     cleaned_uuids_by_acp.setdefault(acp_dir, set()).update(s.uuid for s in prof_sessions)
-                    print(f"  {st.green('✓')} " + tr("trashed_bundle", name=st.hi(bname)))
+                    add_ok(tr("trashed_bundle", name=bname), tr("trashed_bundle", name=st.hi(bname)))
                 except UncertainTrashError as exc:
-                    print(
-                        f"  {st.bold_red('[ERROR]')} "
-                        + tr("trash_uncertain", p=prof_tag, name=exc.bundle_name, err=exc.reason),
-                        file=sys.stderr,
-                    )
+                    add_err(tr("trash_uncertain", p=prof_tag, name=exc.bundle_name, err=exc.reason))
                     if exc.bundle_dir is not None:
-                        print(f"    {st.subtle(str(exc.bundle_dir))}", file=sys.stderr)
-                    exit_code = 1
+                        out.stderr_lines.append(f"    {st.subtle(str(exc.bundle_dir))}")
+                        out.display_items.append(("info", str(exc.bundle_dir)))
                     any_file_error = True
                 except PartialRollbackError as exc:
                     unrolled = ", ".join(p.name for p in exc.failed_paths)
-                    print(
-                        f"  {st.bold_red('[ERROR]')} "
-                        + tr("trash_partial_rollback", p=prof_tag, path=str(exc.bundle_dir), files=unrolled),
-                        file=sys.stderr,
-                    )
-                    exit_code = 1
+                    add_err(tr("trash_partial_rollback", p=prof_tag, path=str(exc.bundle_dir), files=unrolled))
                     any_file_error = True
                 except Exception as exc:
-                    print(
-                        f"  {st.bold_red('[ERROR]')} "
-                        + tr("trash_profile_failed", p=prof_tag, err=str(exc)),
-                        file=sys.stderr,
-                    )
-                    exit_code = 1
+                    add_err(tr("trash_profile_failed", p=prof_tag, err=str(exc)))
                     any_file_error = True
 
-    if prune_summaries:
+    if prune_summaries and (not prune_only_cleaned or any(cleaned_uuids_by_acp.values())):
         if any_file_error:
-            print(f"  {st.yellow('⚠')} " + tr("skip_idx_after_err"))
+            add_warn(tr("skip_idx_after_err"))
         else:
             fresh_state: Optional[T3State] = None
             state_db_path: Optional[Path] = None
@@ -2833,17 +3139,18 @@ def execute_cleanup(
                 state_db_path = verify_t3_contract(t3_home / "userdata")
                 fresh_state = load_t3_state(state_db_path)
             except ContractError as exc:
-                print(f"{st.bold_red('ERROR (fail-closed): ')}{exc}", file=sys.stderr)
-                exit_code = 2
+                add_err(str(exc), code=2, prefix=st.bold_red("ERROR (fail-closed): "))
             except Exception as exc:
-                print(f"{st.bold_red('ERROR: ')}{exc}", file=sys.stderr)
-                exit_code = 1
+                add_err(str(exc), code=1, prefix=st.bold_red("ERROR: "))
 
             if fresh_state is not None and state_db_path is not None:
                 t3_db_open, t3_lsof_err = (False, None) if skip_lsof else inspect_file_open(state_db_path)
                 multi_profile = len(reports) > 1
                 for rep in reports:
                     if not rep.summaries_db_exists:
+                        continue
+                    cleaned_here = cleaned_uuids_by_acp.get(rep.acp_dir, set())
+                    if prune_only_cleaned and not cleaned_here:
                         continue
                     _, summaries = read_summary_index(rep.acp_dir)
                     if not summaries:
@@ -2862,49 +3169,64 @@ def execute_cleanup(
                         disk_ids=set(disk_after),
                         deleted_ids=set(deleted_now),
                         superseded_ids=set(fresh_state.superseded_uuids),
-                        cleaned_this_run=cleaned_uuids_by_acp.get(rep.acp_dir, set()),
+                        cleaned_this_run=cleaned_here,
+                        only_cleaned=prune_only_cleaned,
                     )
                     if not safe_ids:
                         continue
 
-                    live_staging = scan_staging_leftovers(rep.acp_dir)
-                    if live_staging:
-                        print(
-                            f"  {st.yellow('⚠')} "
-                            + tr("skip_idx_staging", p=rep.profile_name[:12], path=str(rep.acp_dir.parent / ".t3-clean-staging"))
-                        )
+                    if scan_staging_leftovers(rep.acp_dir):
+                        add_warn(tr("skip_idx_staging", p=rep.profile_name[:12], path=str(rep.acp_dir.parent / ".t3-clean-staging")))
                         continue
 
                     _, summaries_open, lsof_err = (set(), False, None) if skip_lsof else inspect_open_handles(rep.acp_dir)
                     if t3_db_open or t3_lsof_err or lsof_err or summaries_open or is_profile_in_use_by_process(rep.acp_dir.parent):
-                        print(f"  {st.yellow('⚠')} " + tr("skip_idx_busy", p=rep.profile_name[:12]))
+                        add_warn(tr("skip_idx_busy", p=rep.profile_name[:12]))
                     else:
                         try:
                             removed_rows, backup_name, vacuum_err = prune_summaries_db(
                                 rep.acp_dir, safe_ids, multi_profile=multi_profile
                             )
+                            out.pruned_rows += removed_rows
                             if vacuum_err:
-                                print(f"  {st.green('✓')} " + tr("pruned_rows_novac", n=removed_rows))
-                                print(f"  {st.yellow('⚠')} " + tr("vacuum_warn", err=vacuum_err))
+                                add_ok(tr("pruned_rows_novac", n=removed_rows))
+                                add_warn(tr("vacuum_warn", err=vacuum_err))
                             else:
-                                print(f"  {st.green('✓')} " + tr("pruned_rows", n=removed_rows))
+                                add_ok(tr("pruned_rows", n=removed_rows))
                             if backup_name:
-                                print(f"    {st.subtle(tr('backup_saved', name=st.hi(backup_name)))}")
+                                out.stdout_lines.append(f"    {st.subtle(tr('backup_saved', name=st.hi(backup_name)))}")
+                                out.display_items.append(("info", tr("backup_saved", name=backup_name)))
                         except ContractError as exc:
-                            print(f"  {st.yellow('⚠ ' + str(exc))}")
+                            add_warn(str(exc), full_yellow=True)
                         except SummariesPruneError as exc:
-                            print(f"  {st.bold_red('[ERROR]')} conversation_summaries.db: {exc.reason}", file=sys.stderr)
+                            add_err(f"conversation_summaries.db: {exc.reason}")
                             if exc.backup_name:
-                                print(f"    {st.subtle(tr('backup_saved', name=st.hi(exc.backup_name)))}")
-                            exit_code = 1
+                                out.stdout_lines.append(f"    {st.subtle(tr('backup_saved', name=st.hi(exc.backup_name)))}")
+                                out.display_items.append(("info", tr("backup_saved", name=exc.backup_name)))
                         except Exception as exc:
-                            print(f"  {st.bold_red('[ERROR]')} conversation_summaries.db: {exc}", file=sys.stderr)
-                            exit_code = 1
+                            add_err(f"conversation_summaries.db: {exc}")
 
     if chosen or not prune_summaries:
         done_key = "done_perm" if permanent else "done_trash"
-        print("\n" + tr(done_key, n=st.hi(str(cleaned_count)), sz=st.green(format_bytes(cleaned_bytes))))
-    return exit_code
+        out.stdout_lines.append("\n" + tr(done_key, n=st.hi(str(out.cleaned_count)), sz=st.green(format_bytes(out.cleaned_bytes))))
+        out.display_items.append(("ok" if not out.has_errors else "info", tr(done_key, n=str(out.cleaned_count), sz=format_bytes(out.cleaned_bytes))))
+    return out
+
+
+def execute_cleanup(
+    t3_home: Path, reports: List[ProfileReport], chosen: List[SessionRecord], *,
+    prune_summaries: bool, permanent: bool, skip_lsof: bool, st: Style, tr: Translator,
+    min_age_hours: float = 24.0,
+) -> int:
+    outcome = _run_cleanup(
+        t3_home, reports, chosen, prune_summaries=prune_summaries,
+        permanent=permanent, skip_lsof=skip_lsof, st=st, tr=tr, min_age_hours=min_age_hours,
+    )
+    for line in outcome.stdout_lines:
+        print(line)
+    for line in outcome.stderr_lines:
+        print(line, file=sys.stderr)
+    return outcome.exit_code
 
 
 # ------------------------- Entrypoint -------------------------
