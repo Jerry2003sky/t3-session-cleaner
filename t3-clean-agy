@@ -1,0 +1,3009 @@
+#!/usr/bin/env python3
+"""Safely preview, interactively select, and clean orphaned Antigravity sessions
+left behind by T3 Code on macOS.
+
+Design invariants (fail-closed):
+  1. Never clean if a newer T3 state DB (e.g. statev3.sqlite) exists or expected
+     SQLite tables/columns are missing.
+  2. Never clean if live Antigravity threads exist in T3 yet 0 disk sessions match
+     the parsed active whitelist (guards against T3 schema/format drift).
+  3. Wide whitelist (live + archived threads, nested native subagents, pending
+     handoffs/transfers/outbox, open lsof handles, cooldown window) + narrow
+     evidence-based deletion.
+  4. Real-time re-verification right before touching disk (prevents TOCTOU races).
+  5. Default cleanup is pure file-only bundled Trash (manifest.json + restore.sh);
+     conversation_summaries.db is only mutated on explicit request with schema
+     verification and a consistent WAL-merged snapshot backup in Trash.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import math
+import os
+import re
+import select
+import shlex
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import termios
+import time
+import tty
+import unicodedata
+import urllib.parse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+__version__ = "0.1.0"
+
+UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+STRICT_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+STATE_DB_RE = re.compile(r"^statev(\d+)\.sqlite$")
+CONV_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".meta", ".pb")
+SQLITE_SIDECAR_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal")
+ANSI_STRIP_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ANSI_ESC_RE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+CTRL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+REQUIRED_SCHEMA: Dict[str, Set[str]] = {
+    "orchestration_v2_projection_threads": {
+        "thread_id", "title", "default_provider", "provider_instance_id", "archived_at", "deleted_at",
+    },
+    "orchestration_v2_projection_provider_threads": {
+        "thread_id", "provider", "provider_thread_id", "payload_json",
+    },
+    "orchestration_v2_projection_run_attempts": {"thread_id", "provider", "payload_json"},
+    "orchestration_v2_projection_subagents": {"thread_id", "provider", "payload_json"},
+    "orchestration_v2_projection_context_handoffs": {"thread_id", "status", "payload_json"},
+    "orchestration_v2_projection_context_transfers": {
+        "source_thread_id", "target_thread_id", "status", "payload_json",
+    },
+    "orchestration_v2_effect_outbox": {"thread_id", "status", "payload_json"},
+}
+
+TERMINAL_HANDOFF_STATUSES = {"ready", "consumed", "completed", "cancelled", "failed", "disposed"}
+TERMINAL_TRANSFER_STATUSES = {"consumed", "resolved_portable", "cancelled", "failed", "disposed"}
+TERMINAL_OUTBOX_STATUSES = {"succeeded", "cancelled"}
+
+
+# ------------------------- Lightweight i18n -------------------------
+
+
+MESSAGES: Dict[str, Dict[str, str]] = {
+    "zh": {
+        "app_sub": "Antigravity 残留清理",
+        "app_sub_short": "残留清理",
+        "mode_trash": "移入废纸篓 · 可还原",
+        "mode_trash_short": "废纸篓 · 可还原",
+        "mode_perm": "永久删除模式",
+        "untitled": "(无标题)",
+        "sessions_cnt": "{n} 个会话",
+        "items_cnt": "{n} 项",
+        "rows_cnt": "{n} 条",
+        "legend_active": "活跃",
+        "legend_clean": "可清",
+        "legend_other": "其它",
+        "status_all_clean": "✓ 无残留文件 · 100% 活跃",
+        "status_all_clean_short": "✓ 无残留",
+        "status_empty": "暂无本地会话",
+        "bar_reclaimable": "可清理 {pct}",
+        "bar_inactive": "非活跃 {pct}",
+        "m_del_old": "已删对话 (>{h}h)",
+        "m_del_new": "冷静期内 (<{h}h)",
+        "m_active": "活跃保护",
+        "m_super": "旧版会话",
+        "m_unknown": "未关联",
+        "m_index": "失效索引",
+        "idx_busy": "T3 运行中",
+        "idx_staging": "有暂存残留",
+        "idx_ready": "可清理",
+        "idx_clean": "已干净",
+        "locked_warn": "有 {n} 个会话正被进程占用，将自动跳过",
+        "staging_warn_restore": "发现残留暂存包：{path}（先运行其中的 restore.sh，确认还原后再删除该目录）",
+        "staging_warn_plain": "发现残留暂存项：{path}（请先检查内容，勿直接删除）",
+        "act_std": "标准清理",
+        "act_std_desc": "清理已删对话 (>{h}h)",
+        "act_deep": "彻底清理",
+        "act_deep_desc": "全部已删对话与旧版会话",
+        "act_idx": "清理索引",
+        "act_idx_desc": "移除 summaries.db 失效记录",
+        "act_idx_need_quit": "{n} 条 · 需退出 T3",
+        "act_idx_need_staging": "{n} 条 · 需处理暂存",
+        "act_custom": "自定义勾选…",
+        "act_custom_desc": "按条目挑选（含未关联会话）",
+        "act_details": "查看全部会话",
+        "act_details_desc": "浏览本地会话完整列表",
+        "act_quit": "退出",
+        "k_move": "移动",
+        "k_scroll": "滚动",
+        "k_confirm": "确认",
+        "k_select": "选择",
+        "k_next": "下一步",
+        "k_quick_y": "快捷确认",
+        "k_toggle": "勾选",
+        "k_all_del": "全选已删",
+        "k_none": "清空",
+        "k_show_act": "显示活跃",
+        "k_hide_act": "隐藏活跃",
+        "k_idx": "索引",
+        "k_refresh": "刷新",
+        "k_lang": "English",
+        "k_back": "返回",
+        "k_quit": "退出",
+        "notice_no_std": "当前没有超过冷静期的已删对话可清理。",
+        "notice_no_deep": "当前没有可清理的已删对话或旧版会话。",
+        "notice_idx_clean": "summaries.db 已干净，无需清理。",
+        "notice_idx_busy": "检测到 T3 Code / agy 正在运行，请先完全退出 T3 后再清理索引。",
+        "notice_idx_staging": "检测到残留暂存目录 .t3-clean-staging，请先处理后再清理索引。",
+        "notice_none_sel": "未选中任何项目。",
+        "notice_cancelled": "已取消操作。",
+        "notice_refreshed": "已重新扫描磁盘与运行状态。",
+        "notice_refresh_err": "刷新失败：{err}",
+        "v_custom_title": "自定义勾选",
+        "v_custom_selected": "已选 {n} 项 ({sz})",
+        "v_custom_idx_on": "失效索引: 开 ({n})",
+        "v_custom_idx_off": "失效索引: 关 ({n})",
+        "v_custom_empty": "当前没有非活跃会话，按 s 可查看活跃会话",
+        "v_details_title": "全部本地会话",
+        "v_details_empty": "当前没有任何 Antigravity 本地会话",
+        "v_confirm_title": "确认执行清理",
+        "v_confirm_title_perm": "确认永久删除",
+        "v_confirm_sub_trash": "打包移入废纸篓 · 自带 restore.sh",
+        "v_confirm_sub_perm": "不可恢复 · 下一步需输入 DELETE",
+        "v_confirm_body": "即将清理 {n} 个会话，预计释放 {sz}",
+        "v_confirm_idx": "同步清理 summaries.db 约 {n} 条失效索引（先备份至废纸篓）",
+        "v_confirm_ok": "确认清理并打包移入废纸篓",
+        "v_confirm_ok_perm": "确认永久删除（下一步需输入 DELETE）",
+        "v_confirm_cancel": "取消，返回主菜单",
+        "col_status": "状态",
+        "col_id": "ID",
+        "col_size": "大小",
+        "col_age": "时长",
+        "col_note": "说明",
+        "col_title": "标题",
+        "b_active": "活跃",
+        "b_deleted": "已删",
+        "b_super": "旧版",
+        "b_unknown": "未关联",
+        "b_locked": "占用",
+        "b_trash": "移废纸篓",
+        "b_perm": "永久删除",
+        "b_skip": "已跳过",
+        "note_active": "活跃对话",
+        "note_archived": "已归档",
+        "note_subagent": "子代理",
+        "note_del_subagent": "已删子代理",
+        "note_cur_env": "当前会话",
+        "note_super": "历史旧版",
+        "note_unknown": "无线程关联",
+        "note_locked": "占用中",
+        "note_cooldown": "冷静期内",
+        "note_deleted_on": "{d} 已删",
+        "cli_preview": "预览模式 · 只读",
+        "cli_apply_trash": "执行清理 · 废纸篓",
+        "cli_apply_perm": "执行清理 · 永久删除",
+        "cli_meta": "冷静期 {h}h · 旧版={s} · 未关联={u}",
+        "on": "开",
+        "off": "关",
+        "sec_clean": "待清理",
+        "sec_skip": "受保护跳过",
+        "sec_report": "仅报告 · 默认不删",
+        "sec_active": "活跃保护",
+        "cli_expand_hint": "加 -v 展开明细",
+        "cli_space": "空间变化",
+        "cli_free_est": "预计释放 {sz}",
+        "cli_no_free": "当前无待释放项",
+        "cli_idx_left": "失效索引：{n} 条记录（每条 <1 KB，退出 T3 后可用 --prune-summaries 清理）",
+        "cli_idx_clean": "失效索引：已干净（0 条记录）",
+        "exit_clean": "已退出，未改动任何文件。",
+        "done_trash": "完成：打包移入废纸篓 {n} 个会话，释放 {sz}。",
+        "done_perm": "完成：永久删除 {n} 个会话，释放 {sz}。",
+        "trashed_bundle": "已打包移入废纸篓：{name}（内含 manifest.json 与 restore.sh）",
+        "trash_partial_rollback": "Profile {p} 移入废纸篓失败且部分文件未能回滚，原件保留在暂存目录：{path}（未回滚：{files}）",
+        "trash_uncertain": "Profile {p} 移入废纸篓返回错误，且文件已不在原位与暂存目录，请检查废纸篓中的 {name}：{err}",
+        "trash_profile_failed": "Profile {p} 移入废纸篓失败（该 Profile 已回滚）：{err}",
+        "pruned_rows": "已移除 conversation_summaries.db 中 {n} 条失效记录并完成 VACUUM。",
+        "pruned_rows_novac": "已移除 conversation_summaries.db 中 {n} 条失效记录（已提交）。",
+        "vacuum_warn": "VACUUM 失败（不影响已提交的清理）：{err}",
+        "backup_saved": "改库前原件已备份至废纸篓：{name}（内含 restore.sh）",
+        "skip_idx_busy": "已跳过索引清理：Profile {p} 正被运行中的 T3/agy 使用，请先退出 T3 Code。",
+        "skip_idx_staging": "已跳过索引清理：Profile {p} 存在残留暂存目录 {path}，请先处理。",
+        "skip_idx_after_err": "已跳过全部索引清理：本次文件清理存在失败项，为保护未完成数据暂不改库。",
+        "reverify_blocked": "复检已拦截：{uid} ({title}) — {reason}",
+        "rev_removed": "文件已不存在",
+        "rev_active": "已重新变为活跃会话",
+        "rev_cat_changed": "类别已变化 ({old} → {new})",
+        "rev_locked": "正被进程占用 (lsof)",
+        "rev_modified": "预览后有新写入",
+        "rev_cooldown": "已进入冷静期",
+        "no_profiles": "未在 ~/.t3/userdata/providers/antigravity/ 下发现任何 Antigravity 数据目录。",
+        "no_work": "没有可执行的清理项。",
+        "confirm_nontty": "ERROR: 非交互终端下执行 --apply 必须显式传入 -y / --yes。",
+        "confirm_perm_prompt": "  ⚠ 永久删除无法恢复！请输入 DELETE 确认，直接回车取消：",
+        "confirm_trash_prompt": "  确认打包移入 macOS 废纸篓？[y/N]：",
+        "cancelled": "已取消，未改动任何文件。",
+    },
+    "en": {
+        "app_sub": "Antigravity Cleanup",
+        "app_sub_short": "Cleanup",
+        "mode_trash": "Trash bundle · Restorable",
+        "mode_trash_short": "Trash · Restorable",
+        "mode_perm": "Permanent delete",
+        "untitled": "(untitled)",
+        "sessions_cnt": "{n} sessions",
+        "items_cnt": "{n}",
+        "rows_cnt": "{n} entries",
+        "legend_active": "Active",
+        "legend_clean": "Cleanable",
+        "legend_other": "Other",
+        "status_all_clean": "✓ Clean · 100% active",
+        "status_all_clean_short": "✓ Clean",
+        "status_empty": "No local sessions",
+        "bar_reclaimable": "{pct} cleanable",
+        "bar_inactive": "{pct} inactive",
+        "m_del_old": "Deleted (>{h}h)",
+        "m_del_new": "Cooldown (<{h}h)",
+        "m_active": "Protected",
+        "m_super": "Superseded",
+        "m_unknown": "Unlinked",
+        "m_index": "Stale index",
+        "idx_busy": "T3 running",
+        "idx_staging": "Staging leftover",
+        "idx_ready": "Ready",
+        "idx_clean": "Clean",
+        "locked_warn": "{n} session(s) currently open by a process (auto-skipped)",
+        "staging_warn_restore": "Leftover staging bundle: {path} (run restore.sh inside it first, verify restored, then remove)",
+        "staging_warn_plain": "Leftover staging item: {path} (inspect contents first; do not delete directly)",
+        "act_std": "Standard clean",
+        "act_std_desc": "Clean deleted sessions (>{h}h)",
+        "act_deep": "Deep clean",
+        "act_deep_desc": "All deleted & superseded sessions",
+        "act_idx": "Prune index",
+        "act_idx_desc": "Remove stale entries in summaries.db",
+        "act_idx_need_quit": "{n} entries · Quit T3",
+        "act_idx_need_staging": "{n} entries · Resolve staging",
+        "act_custom": "Select manually…",
+        "act_custom_desc": "Pick individual sessions (incl. unlinked)",
+        "act_details": "View all sessions",
+        "act_details_desc": "Browse complete local session list",
+        "act_quit": "Quit",
+        "k_move": "Move",
+        "k_scroll": "Scroll",
+        "k_confirm": "Confirm",
+        "k_select": "Select",
+        "k_next": "Next",
+        "k_quick_y": "Quick yes",
+        "k_toggle": "Toggle",
+        "k_all_del": "All deleted",
+        "k_none": "Clear",
+        "k_show_act": "Show active",
+        "k_hide_act": "Hide active",
+        "k_idx": "Index",
+        "k_refresh": "Refresh",
+        "k_lang": "中文",
+        "k_back": "Back",
+        "k_quit": "Quit",
+        "notice_no_std": "No deleted sessions past the cooldown period.",
+        "notice_no_deep": "No deleted or superseded sessions to clean.",
+        "notice_idx_clean": "summaries.db is already clean.",
+        "notice_idx_busy": "T3 Code / agy is running. Quit T3 completely before pruning the index.",
+        "notice_idx_staging": "Leftover .t3-clean-staging found. Resolve it before pruning the index.",
+        "notice_none_sel": "No items selected.",
+        "notice_cancelled": "Cancelled.",
+        "notice_refreshed": "Rescanned disk and process status.",
+        "notice_refresh_err": "Refresh failed: {err}",
+        "v_custom_title": "Select Sessions",
+        "v_custom_selected": "Selected {n} ({sz})",
+        "v_custom_idx_on": "Stale index: ON ({n})",
+        "v_custom_idx_off": "Stale index: OFF ({n})",
+        "v_custom_empty": "No inactive sessions. Press s to view active sessions.",
+        "v_details_title": "All Local Sessions",
+        "v_details_empty": "No Antigravity sessions found on disk.",
+        "v_confirm_title": "Confirm Cleanup",
+        "v_confirm_title_perm": "Confirm Permanent Delete",
+        "v_confirm_sub_trash": "Single Trash bundle · restore.sh included",
+        "v_confirm_sub_perm": "Irreversible · Next step requires typing DELETE",
+        "v_confirm_body": "Ready to clean {n} session(s), freeing {sz}",
+        "v_confirm_idx": "Prune ~{n} stale index entries in summaries.db (backed up)",
+        "v_confirm_ok": "Move bundled folder to Trash",
+        "v_confirm_ok_perm": "Delete permanently (type DELETE next)",
+        "v_confirm_cancel": "Cancel and go back",
+        "col_status": "Status",
+        "col_id": "ID",
+        "col_size": "Size",
+        "col_age": "Age",
+        "col_note": "Note",
+        "col_title": "Title",
+        "b_active": "Active",
+        "b_deleted": "Deleted",
+        "b_super": "Previous",
+        "b_unknown": "Unlinked",
+        "b_locked": "Locked",
+        "b_trash": "Trash",
+        "b_perm": "Delete",
+        "b_skip": "Skip",
+        "note_active": "Active thread",
+        "note_archived": "Archived",
+        "note_subagent": "Subagent",
+        "note_del_subagent": "Del subagent",
+        "note_cur_env": "Current shell",
+        "note_super": "Superseded",
+        "note_unknown": "Unlinked",
+        "note_locked": "In use",
+        "note_cooldown": "Cooldown",
+        "note_deleted_on": "Del {d}",
+        "cli_preview": "Dry-run · Read-only",
+        "cli_apply_trash": "Apply · Trash",
+        "cli_apply_perm": "Apply · Permanent",
+        "cli_meta": "cooldown {h}h · superseded={s} · unlinked={u}",
+        "on": "on",
+        "off": "off",
+        "sec_clean": "To clean",
+        "sec_skip": "Skipped (protected)",
+        "sec_report": "Report only",
+        "sec_active": "Protected active",
+        "cli_expand_hint": "pass -v to list",
+        "cli_space": "Storage",
+        "cli_free_est": "freeing {sz}",
+        "cli_no_free": "nothing to free",
+        "cli_idx_left": "Stale index: {n} entry(ies) (<1 KB each; quit T3 then run --prune-summaries)",
+        "cli_idx_clean": "Stale index: clean (0 entries)",
+        "exit_clean": "Exited without changing any files.",
+        "done_trash": "Done: moved {n} session(s) to Trash, freed {sz}.",
+        "done_perm": "Done: permanently deleted {n} session(s), freed {sz}.",
+        "trashed_bundle": "Moved bundle to Trash: {name} (includes manifest.json & restore.sh)",
+        "trash_partial_rollback": "Profile {p} trash failed with incomplete rollback; originals kept at: {path} (unrolled: {files})",
+        "trash_uncertain": "Profile {p} trash returned an error and file(s) are no longer at source or staging; check macOS Trash for {name}: {err}",
+        "trash_profile_failed": "Profile {p} trash failed (this profile rolled back): {err}",
+        "pruned_rows": "Removed {n} stale entry(ies) from conversation_summaries.db and ran VACUUM.",
+        "pruned_rows_novac": "Removed {n} stale entry(ies) from conversation_summaries.db (committed).",
+        "vacuum_warn": "VACUUM failed (committed deletions are intact): {err}",
+        "backup_saved": "Pre-prune DB backup moved to Trash: {name} (includes restore.sh)",
+        "skip_idx_busy": "Skipped index prune: profile {p} is in use by T3/agy. Quit T3 Code first.",
+        "skip_idx_staging": "Skipped index prune: profile {p} has leftover staging dir {path}.",
+        "skip_idx_after_err": "Skipped all index pruning because file cleanup had failure(s).",
+        "reverify_blocked": "Blocked by live re-check: {uid} ({title}) — {reason}",
+        "rev_removed": "already removed",
+        "rev_active": "became active",
+        "rev_cat_changed": "category changed ({old} -> {new})",
+        "rev_locked": "open by process (lsof)",
+        "rev_modified": "modified after preview",
+        "rev_cooldown": "entered cooldown",
+        "no_profiles": "No Antigravity profiles found under ~/.t3/userdata/providers/antigravity/.",
+        "no_work": "Nothing to clean.",
+        "confirm_nontty": "ERROR: non-interactive --apply requires -y / --yes.",
+        "confirm_perm_prompt": "  ⚠ Permanent delete cannot be undone! Type DELETE to confirm: ",
+        "confirm_trash_prompt": "  Move bundled folder to macOS Trash? [y/N]: ",
+        "cancelled": "Cancelled. No files changed.",
+    },
+}
+
+
+def config_file_path() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else (Path.home() / ".config")
+    return base / "t3-clean-agy" / "config.json"
+
+
+def detect_default_lang() -> str:
+    for key in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(key, "").strip().lower()
+        if val:
+            return "zh" if val.startswith("zh") else "en"
+    return "en"
+
+
+def load_saved_lang() -> str:
+    try:
+        data = json.loads(config_file_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("lang") in MESSAGES:
+            return str(data["lang"])
+    except (OSError, json.JSONDecodeError):
+        pass
+    return detect_default_lang()
+
+
+def save_lang(lang: str) -> bool:
+    if lang not in MESSAGES:
+        return False
+    cfg = config_file_path()
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict = {}
+        try:
+            loaded = json.loads(cfg.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+        existing["lang"] = lang
+        tmp = cfg.with_suffix(".tmp")
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, cfg)
+        return True
+    except OSError:
+        return False
+
+
+class Translator:
+    def __init__(self, lang: str) -> None:
+        self.set_lang(lang)
+
+    def set_lang(self, lang: str) -> None:
+        self.lang = lang if lang in MESSAGES else "en"
+        self.table = MESSAGES[self.lang]
+
+    def toggle_and_save(self) -> bool:
+        next_lang = "en" if self.lang == "zh" else "zh"
+        self.set_lang(next_lang)
+        return save_lang(next_lang)
+
+    def __call__(self, key: str, **kwargs: object) -> str:
+        tmpl = self.table[key]
+        return tmpl.format(**kwargs) if kwargs else tmpl
+
+
+class ContractError(RuntimeError):
+    """Raised when local T3 or Antigravity storage violates the verified schema contract."""
+
+
+class PartialRollbackError(RuntimeError):
+    """Raised when trash fails and some moved files could not be moved back cleanly."""
+
+    def __init__(self, reason: str, bundle_dir: Path, failed_paths: List[Path]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.bundle_dir = bundle_dir
+        self.failed_paths = failed_paths
+
+
+class UncertainTrashError(RuntimeError):
+    """Raised when trash exits non-zero and moved files are missing from both source and staging."""
+
+    def __init__(
+        self, reason: str, bundle_name: str, missing_paths: List[Path], bundle_dir: Optional[Path] = None
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.bundle_name = bundle_name
+        self.missing_paths = missing_paths
+        self.bundle_dir = bundle_dir
+
+
+class SummariesPruneError(RuntimeError):
+    """Raised when DELETE fails on conversation_summaries.db after backup succeeded."""
+
+    def __init__(self, reason: str, backup_name: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.backup_name = backup_name
+
+
+@dataclass
+class SummaryRow:
+    title: str
+    step_count: Optional[int]
+    last_modified_time: str
+    parent_id: str
+    has_title_col: bool
+    has_step_col: bool
+
+    @property
+    def is_empty_shell(self) -> bool:
+        return self.has_title_col and self.has_step_col and self.step_count == 0 and self.title.strip() == ""
+
+
+@dataclass
+class T3State:
+    live_threads: Dict[str, Tuple[str, Optional[str]]]
+    deleted_threads: Dict[str, Tuple[str, str]]
+    active_uuids: Dict[str, Tuple[str, str]]
+    deleted_uuids: Dict[str, Tuple[str, str]]
+    deleted_timestamps: Dict[str, Optional[float]]
+    superseded_uuids: Dict[str, Tuple[str, str]]
+    has_live_antigravity_threads: bool
+
+
+@dataclass
+class SessionRecord:
+    profile_name: str
+    acp_dir: Path
+    uuid: str
+    category: str  # ACTIVE | DELETED | SUPERSEDED | UNKNOWN
+    detail: str
+    display_title: str
+    paths: List[Path]
+    size_bytes: int
+    latest_mtime: float
+    locked: bool = False
+    too_recent: bool = False
+    selected: bool = False
+    skip_reason: Optional[str] = None
+
+    @property
+    def selectable_in_tui(self) -> bool:
+        return self.category != "ACTIVE" and not self.locked
+
+
+@dataclass
+class ProfileReport:
+    profile_name: str
+    acp_dir: Path
+    sessions: List[SessionRecord] = field(default_factory=list)
+    orphan_summary_ids: List[str] = field(default_factory=list)
+    summary_ids: Set[str] = field(default_factory=set)
+    summaries_db_exists: bool = False
+    summaries_open: bool = False
+    staging_leftovers: List[Path] = field(default_factory=list)
+    lsof_error: Optional[str] = None
+    t3_db_open: bool = False
+    t3_lsof_error: Optional[str] = None
+
+
+# ------------------------- Terminal styling & layout -------------------------
+
+
+class Style:
+    """Muted 256-color palette (no harsh reverse-video white blocks)."""
+
+    _CODES = {
+        "bold": "1", "soft": "38;5;251", "hi": "1;38;5;255", "dim": "38;5;242",
+        "border": "38;5;239", "subtle": "38;5;247", "accent": "38;5;111",
+        "accent_bold": "1;38;5;117", "green": "38;5;114", "yellow": "38;5;221",
+        "cyan": "38;5;116", "bold_cyan": "1;38;5;117", "lavender": "38;5;141",
+        "red": "38;5;203", "bold_red": "1;38;5;203",
+    }
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def wrap(self, code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if (self.enabled and text) else text
+
+    def __getattr__(self, name: str):
+        code = self._CODES.get(name)
+        if code is None:
+            raise AttributeError(name)
+        return lambda text: self.wrap(code, text)
+
+
+def make_style(no_color: bool = False) -> Style:
+    if no_color or os.environ.get("NO_COLOR") is not None or os.environ.get("TERM") == "dumb":
+        return Style(False)
+    return Style(sys.stdout.isatty())
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_STRIP_RE.sub("", text)
+
+
+def char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+
+
+def display_width(text: str) -> int:
+    return sum(char_width(ch) for ch in strip_ansi(text))
+
+
+def truncate_width(text: str, max_cols: int) -> str:
+    if max_cols <= 0:
+        return ""
+    if display_width(text) <= max_cols:
+        return text
+    if max_cols == 1:
+        return "…"
+    out: List[str] = []
+    used = 0
+    for ch in text:
+        w = char_width(ch)
+        if used + w > max_cols - 1:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"
+
+
+def pad_right(text: str, width: int) -> str:
+    t = truncate_width(text, width)
+    return t + (" " * max(0, width - display_width(t)))
+
+
+def pad_left(text: str, width: int) -> str:
+    t = truncate_width(text, width)
+    return (" " * max(0, width - display_width(t))) + t
+
+
+def box_top(st: Style, inner_w: int, margin: str = "  ") -> str:
+    return margin + st.border("╭" + "─" * inner_w + "╮")
+
+
+def box_bottom(st: Style, inner_w: int, margin: str = "  ") -> str:
+    return margin + st.border("╰" + "─" * inner_w + "╯")
+
+
+def box_row(st: Style, content: str, inner_w: int, margin: str = "  ") -> str:
+    gap = max(0, (inner_w - 4) - display_width(content))
+    return margin + st.border("│") + "  " + content + (" " * gap) + "  " + st.border("│")
+
+
+def box_split_row(st: Style, left: str, right: str, inner_w: int, margin: str = "  ") -> str:
+    body_w = inner_w - 4
+    lw, rw = display_width(left), display_width(right)
+    if lw + 2 + rw <= body_w:
+        return box_row(st, left + (" " * (body_w - lw - rw)) + right, inner_w, margin)
+    if lw <= body_w:
+        return box_row(st, left, inner_w, margin)
+    return box_row(st, truncate_width(strip_ansi(left), body_w), inner_w, margin)
+
+
+def render_storage_bar(
+    st: Style, bar_w: int, active_bytes: int, cleanable_bytes: int, other_bytes: int
+) -> str:
+    """Segmented slim bar with 1-cell breathing gaps between non-zero segments."""
+    present = [(v, fn) for v, fn in ((active_bytes, st.green), (cleanable_bytes, st.yellow), (other_bytes, st.lavender)) if v > 0]
+    total = sum(v for v, _ in present)
+    if total <= 0 or bar_w <= 0:
+        return st.border("─" * max(0, bar_w))
+    usable = max(len(present), bar_w - max(0, len(present) - 1))
+    widths = [max(1, round(usable * v / total)) for v, _ in present]
+    while sum(widths) > usable:
+        i = max(range(len(widths)), key=lambda idx: widths[idx])
+        if widths[i] <= 1:
+            break
+        widths[i] -= 1
+    while sum(widths) < usable:
+        i = max(range(len(widths)), key=lambda idx: present[idx][0])
+        widths[i] += 1
+    return " ".join(fn("━" * w) for w, (_, fn) in zip(widths, present))
+
+
+def format_footer_lines(
+    st: Style, pairs: Sequence[Tuple[str, str]], max_w: int, margin: str = "  "
+) -> List[str]:
+    sep = st.border("  ·  ")
+    avail = max(24, max_w - display_width(margin))
+    lines: List[str] = []
+    cur: List[str] = []
+    cur_w = 0
+    for k, label in pairs:
+        part = f"{st.accent(k)} {st.subtle(label)}"
+        pw = display_width(part)
+        need = pw if not cur else (5 + pw)
+        if cur and cur_w + need > avail:
+            lines.append(margin + sep.join(cur))
+            cur, cur_w = [part], pw
+        else:
+            cur.append(part)
+            cur_w += need
+    if cur:
+        lines.append(margin + sep.join(cur))
+    return lines
+
+
+def fmt_pct(part: int, total: int) -> str:
+    if total <= 0 or part <= 0:
+        return "0%"
+    pct = 100.0 * part / total
+    if pct < 1.0:
+        return "<1%"
+    if pct > 99.0 and part < total:
+        return ">99%"
+    return f"{round(pct)}%"
+
+
+def term_width() -> int:
+    try:
+        return max(74, min(100, shutil.get_terminal_size((92, 24)).columns))
+    except OSError:
+        return 92
+
+
+def flex_metric_cell(st: Style, label: str, value: str, cell_w: int, value_style) -> str:
+    vw = display_width(value)
+    lbl = truncate_width(label, max(6, cell_w - vw - 2))
+    gap = " " * max(1, cell_w - display_width(lbl) - vw)
+    return st.dim(lbl + gap + value) if value_style is None else (st.subtle(lbl) + gap + value_style(value))
+
+
+# ------------------------- Core helpers -------------------------
+
+
+def is_uuid(value: Optional[str]) -> bool:
+    return isinstance(value, str) and bool(STRICT_UUID_RE.match(value))
+
+
+def extract_uuids(text: Optional[str], exclude: Iterable[str] = ()) -> Set[str]:
+    if not text:
+        return set()
+    excl = set(exclude)
+    return {u for u in UUID_RE.findall(text) if u not in excl}
+
+
+def parse_json_safe(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def is_antigravity_provider(provider: Optional[str], instance_id: Optional[str] = None) -> bool:
+    return (provider or "").lower() == "antigravity" or "antigravity" in (instance_id or "").lower()
+
+
+def format_bytes(num: int) -> str:
+    for unit, thresh in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if num >= thresh:
+            return f"{num / thresh:.1f} {unit}" if unit == "KB" else f"{num / thresh:.2f} {unit}"
+    return f"{num} B"
+
+
+def format_age(mtime: float, now: float) -> str:
+    if mtime <= 0:
+        return "-"
+    delta = max(0, int(now - mtime))
+    if delta < 3600:
+        return f"{delta // 60}m"
+    if delta < 86400:
+        return f"{delta / 3600:.1f}h"
+    return f"{delta / 86400:.1f}d"
+
+
+def open_readonly_sqlite(path: Path) -> sqlite3.Connection:
+    encoded = urllib.parse.quote(path.resolve().as_posix(), safe="/")
+    return sqlite3.connect(f"file:{encoded}?mode=ro", uri=True, timeout=5.0)
+
+
+def sanitize_display_text(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"[\t\r\n]+", " ", text)
+    cleaned = ANSI_ESC_RE.sub("", cleaned)
+    cleaned = CTRL_CHAR_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
+def pick_best_title(t3_title: str, agy_title: str) -> str:
+    return sanitize_display_text(t3_title) or sanitize_display_text(agy_title)
+
+
+def session_title(s: SessionRecord, tr: Translator) -> str:
+    return sanitize_display_text(s.display_title) or tr("untitled")
+
+
+def resolve_note(token: str, tr: Translator) -> str:
+    if token.startswith("@note_deleted_on:"):
+        return tr("note_deleted_on", d=sanitize_display_text(token.split(":", 1)[1]))
+    if token.startswith("@") and token[1:] in tr.table:
+        return tr(token[1:])
+    return sanitize_display_text(token)
+
+
+def wrap_display_lines(text: str, max_cols: int) -> List[str]:
+    if max_cols <= 4 or display_width(text) <= max_cols:
+        return [text]
+    lines: List[str] = []
+    cur: List[str] = []
+    used = 0
+    for ch in text:
+        w = char_width(ch)
+        if cur and used + w > max_cols:
+            lines.append("".join(cur))
+            cur, used = [ch], w
+        else:
+            cur.append(ch)
+            used += w
+    if cur:
+        lines.append("".join(cur))
+    return lines
+
+
+# ------------------------- T3 contract & state loading -------------------------
+
+
+def verify_t3_contract(userdata_dir: Path) -> Path:
+    if not userdata_dir.is_dir():
+        raise ContractError(f"T3 userdata directory not found: {userdata_dir}")
+
+    unknown_dbs = sorted(
+        e.name for e in userdata_dir.iterdir()
+        if (m := STATE_DB_RE.match(e.name)) and int(m.group(1)) != 2
+    )
+    if unknown_dbs:
+        raise ContractError(
+            f"Detected unsupported/newer T3 state DB(s): {', '.join(unknown_dbs)}. "
+            "Refusing to run to protect active sessions."
+        )
+
+    db_path = userdata_dir / "statev2.sqlite"
+    if not db_path.is_file():
+        raise ContractError(f"Expected T3 state DB not found: {db_path}")
+
+    conn = open_readonly_sqlite(db_path)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        for table, required_cols in REQUIRED_SCHEMA.items():
+            if table not in tables:
+                raise ContractError(f"Missing required table '{table}' in {db_path}; refusing to clean.")
+            actual_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+            missing = sorted(required_cols - actual_cols)
+            if missing:
+                raise ContractError(
+                    f"Table '{table}' missing required column(s): {', '.join(missing)}; refusing to clean."
+                )
+    finally:
+        conn.close()
+    return db_path
+
+
+def format_deleted_date(raw: str) -> str:
+    return raw[5:10] if (len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-") else raw[:10]
+
+
+def parse_iso_utc(raw: Optional[str]) -> Optional[float]:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.timestamp()
+
+
+def is_later_ts(cand: Optional[float], current: Optional[float]) -> bool:
+    """None represents an unparseable timestamp and is conservatively treated as latest."""
+    if current is None:
+        return False
+    if cand is None:
+        return True
+    return cand > current
+
+
+def load_t3_state(db_path: Path) -> T3State:
+    live_threads: Dict[str, Tuple[str, Optional[str]]] = {}
+    deleted_threads: Dict[str, Tuple[str, str]] = {}
+    active_uuids: Dict[str, Tuple[str, str]] = {}
+    deleted_uuids: Dict[str, Tuple[str, str]] = {}
+    deleted_timestamps: Dict[str, Optional[float]] = {}
+    superseded_uuids: Dict[str, Tuple[str, str]] = {}
+    has_live_agy = False
+
+    def mark(bucket: Dict[str, Tuple[str, str]], u: str, detail: str, title: str) -> None:
+        if is_uuid(u) and u not in bucket:
+            bucket[u] = (detail, title)
+
+    def mark_deleted(u: str, detail: str, title: str, raw_deleted_at: str) -> None:
+        if not is_uuid(u):
+            return
+        d_ts = parse_iso_utc(raw_deleted_at)
+        if u not in deleted_uuids:
+            deleted_uuids[u] = (detail, title)
+            deleted_timestamps[u] = d_ts
+        elif is_later_ts(d_ts, deleted_timestamps[u]):
+            deleted_uuids[u] = (detail, title or deleted_uuids[u][1])
+            deleted_timestamps[u] = d_ts
+
+    conn = open_readonly_sqlite(db_path)
+    try:
+        cur = conn.cursor()
+        for tid, title, dprov, pinst, archived_at, deleted_at in cur.execute(
+            "SELECT thread_id, title, default_provider, provider_instance_id, archived_at, deleted_at "
+            "FROM orchestration_v2_projection_threads"
+        ).fetchall():
+            if deleted_at is None:
+                live_threads[tid] = (title or "", archived_at)
+                if is_antigravity_provider(dprov, pinst):
+                    has_live_agy = True
+            else:
+                deleted_threads[tid] = (title or "", str(deleted_at))
+
+        for tid, provider, ptid, pjson in cur.execute(
+            "SELECT thread_id, provider, provider_thread_id, payload_json "
+            "FROM orchestration_v2_projection_provider_threads"
+        ).fetchall():
+            payload = parse_json_safe(pjson)
+            native_ref = payload.get("nativeThreadRef")
+            native_id = native_ref.get("nativeId") if isinstance(native_ref, dict) else None
+            is_agy = is_antigravity_provider(provider, payload.get("providerInstanceId")) or (
+                isinstance(native_ref, dict) and is_antigravity_provider(native_ref.get("driver"))
+            )
+            if tid in live_threads:
+                title, archived_at = live_threads[tid]
+                tag = "@note_archived" if archived_at else "@note_active"
+                if is_agy:
+                    has_live_agy = True
+                if is_uuid(native_id):
+                    mark(active_uuids, native_id, tag, title)
+                for u in extract_uuids((ptid or "") + " " + (pjson or ""), exclude=[tid]):
+                    mark(active_uuids, u, tag, title)
+            elif tid in deleted_threads and is_agy:
+                title, deleted_at = deleted_threads[tid]
+                detail = f"@note_deleted_on:{format_deleted_date(deleted_at)}"
+                if is_uuid(native_id):
+                    mark_deleted(native_id, detail, title, deleted_at)
+                elif m := re.search(r"native-thread:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", ptid or ""):
+                    mark_deleted(m.group(1), detail, title, deleted_at)
+
+        for tid, provider, pjson in cur.execute(
+            "SELECT thread_id, provider, payload_json FROM orchestration_v2_projection_subagents"
+        ).fetchall():
+            payload = parse_json_safe(pjson)
+            if tid in live_threads:
+                title, _ = live_threads[tid]
+                for u in extract_uuids(pjson, exclude=[tid]):
+                    mark(active_uuids, u, "@note_subagent", title)
+            elif tid in deleted_threads and is_antigravity_provider(provider, payload.get("providerInstanceId")):
+                title, deleted_at = deleted_threads[tid]
+                for key in ("childSessionId", "nativeThreadId"):
+                    if is_uuid(payload.get(key)):
+                        mark_deleted(payload[key], "@note_del_subagent", title, deleted_at)
+
+        for tid, status, pjson in cur.execute(
+            "SELECT thread_id, status, payload_json FROM orchestration_v2_projection_context_handoffs"
+        ).fetchall():
+            if tid in live_threads and status not in TERMINAL_HANDOFF_STATUSES:
+                for u in extract_uuids(pjson, exclude=[tid]):
+                    mark(active_uuids, u, status, live_threads[tid][0])
+
+        for src_tid, dst_tid, status, pjson in cur.execute(
+            "SELECT source_thread_id, target_thread_id, status, payload_json "
+            "FROM orchestration_v2_projection_context_transfers"
+        ).fetchall():
+            if (src_tid in live_threads or dst_tid in live_threads) and status not in TERMINAL_TRANSFER_STATUSES:
+                title = live_threads.get(dst_tid, ("", None))[0] or live_threads.get(src_tid, ("", None))[0]
+                for u in extract_uuids(pjson, exclude=[src_tid, dst_tid]):
+                    mark(active_uuids, u, status, title)
+
+        for tid, status, pjson in cur.execute(
+            "SELECT thread_id, status, payload_json FROM orchestration_v2_effect_outbox"
+        ).fetchall():
+            if status not in TERMINAL_OUTBOX_STATUSES:
+                title = live_threads.get(tid, ("", None))[0]
+                for u in extract_uuids(pjson, exclude=[tid]):
+                    mark(active_uuids, u, status, title)
+
+        for tid, provider, pjson in cur.execute(
+            "SELECT thread_id, provider, payload_json FROM orchestration_v2_projection_run_attempts"
+        ).fetchall():
+            payload = parse_json_safe(pjson)
+            native_tid = payload.get("nativeThreadId")
+            if not is_antigravity_provider(provider, payload.get("providerInstanceId")) or not is_uuid(native_tid):
+                continue
+            if tid in live_threads and native_tid not in active_uuids:
+                mark(superseded_uuids, native_tid, "@note_super", live_threads[tid][0])
+            elif tid in deleted_threads:
+                title, deleted_at = deleted_threads[tid]
+                mark_deleted(native_tid, f"@note_deleted_on:{format_deleted_date(deleted_at)}", title, deleted_at)
+    finally:
+        conn.close()
+
+    env_conv = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
+    if is_uuid(env_conv):
+        mark(active_uuids, env_conv, "@note_cur_env", "")
+
+    for u in active_uuids:
+        deleted_uuids.pop(u, None)
+        deleted_timestamps.pop(u, None)
+        superseded_uuids.pop(u, None)
+    for u in deleted_uuids:
+        superseded_uuids.pop(u, None)
+
+    return T3State(live_threads, deleted_threads, active_uuids, deleted_uuids, deleted_timestamps, superseded_uuids, has_live_agy)
+
+
+def discover_antigravity_profiles(userdata_dir: Path) -> List[Tuple[str, Path]]:
+    root = userdata_dir / "providers" / "antigravity"
+    if not root.is_dir():
+        return []
+    out: List[Tuple[str, Path]] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_symlink() and entry.is_dir():
+            acp_dir = entry / "antigravity-acp"
+            if acp_dir.is_dir() and not acp_dir.is_symlink():
+                out.append((entry.name, acp_dir))
+    return out
+
+
+def read_summary_index(acp_dir: Path) -> Tuple[bool, Dict[str, SummaryRow]]:
+    sdb = acp_dir / "conversation_summaries.db"
+    if not sdb.is_file():
+        return False, {}
+    out: Dict[str, SummaryRow] = {}
+    try:
+        conn = open_readonly_sqlite(sdb)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(conversation_summaries)").fetchall()}
+            if "conversation_id" not in cols:
+                return True, {}
+            has_title = "title" in cols
+            has_step = "step_count" in cols
+            t_col = "title" if has_title else "NULL"
+            s_col = "step_count" if has_step else "NULL"
+            m_col = "last_modified_time" if "last_modified_time" in cols else "''"
+            p_col = "parent_conversation_id" if "parent_conversation_id" in cols else "''"
+            for cid, title, steps, lmt, parent in conn.execute(
+                f"SELECT conversation_id, {t_col}, {s_col}, {m_col}, {p_col} FROM conversation_summaries"
+            ).fetchall():
+                if is_uuid(cid):
+                    parsed_steps: Optional[int] = None
+                    if has_step and steps is not None:
+                        try:
+                            parsed_steps = int(steps)
+                        except (TypeError, ValueError):
+                            parsed_steps = None
+                    out[cid] = SummaryRow(
+                        title=str(title or "") if has_title else "",
+                        step_count=parsed_steps,
+                        last_modified_time=str(lmt or ""),
+                        parent_id=parent if is_uuid(parent) else "",
+                        has_title_col=has_title,
+                        has_step_col=has_step,
+                    )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return True, {}
+    return True, out
+
+
+def collect_subagent_graph(
+    acp_dir: Path, summaries: Dict[str, SummaryRow]
+) -> Dict[str, Set[str]]:
+    children: Dict[str, Set[str]] = {}
+    for cid, row in summaries.items():
+        if row.parent_id:
+            children.setdefault(row.parent_id, set()).add(cid)
+
+    brain_dir = acp_dir / "brain"
+    if brain_dir.is_dir():
+        for entry in brain_dir.iterdir():
+            if not is_uuid(entry.name) or not entry.is_dir() or entry.is_symlink():
+                continue
+            sub_dir = entry / ".system_generated" / "subagents"
+            if not sub_dir.is_dir():
+                continue
+            for item in sub_dir.iterdir():
+                if not item.name.endswith(".json"):
+                    continue
+                if is_uuid(item.name[:-5]):
+                    children.setdefault(entry.name, set()).add(item.name[:-5])
+                try:
+                    data = json.loads(item.read_text(encoding="utf-8", errors="ignore"))
+                    if isinstance(data, dict) and is_uuid(data.get("conversationId")):
+                        children.setdefault(entry.name, set()).add(data["conversationId"])
+                except (OSError, json.JSONDecodeError):
+                    pass
+    return children
+
+
+def expand_descendants(
+    seeds: Dict[str, Tuple[str, str]], children: Dict[str, Set[str]], label: str
+) -> Dict[str, Tuple[str, str]]:
+    expanded = dict(seeds)
+    queue = list(seeds.keys())
+    while queue:
+        cur = queue.pop(0)
+        parent_title = expanded[cur][1]
+        for child in children.get(cur, ()):
+            if child not in expanded:
+                expanded[child] = (label, parent_title)
+                queue.append(child)
+    return expanded
+
+
+def expand_deleted_descendants(
+    seeds: Dict[str, Tuple[str, str]],
+    seed_timestamps: Dict[str, Optional[float]],
+    children: Dict[str, Set[str]],
+    label: str,
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, Optional[float]]]:
+    """Propagate deleted status & latest deletion timestamp across all reachable subagents."""
+    expanded = dict(seeds)
+    expanded_ts: Dict[str, Optional[float]] = {u: seed_timestamps.get(u) for u in seeds}
+    queue = list(seeds.keys())
+    while queue:
+        cur = queue.pop(0)
+        parent_title = expanded[cur][1]
+        parent_ts = expanded_ts.get(cur)
+        for child in children.get(cur, ()):
+            if child not in expanded:
+                expanded[child] = (label, parent_title)
+                expanded_ts[child] = parent_ts
+                queue.append(child)
+            elif is_later_ts(parent_ts, expanded_ts.get(child)):
+                expanded_ts[child] = parent_ts
+                queue.append(child)
+    return expanded, expanded_ts
+
+
+def scan_disk_sessions(acp_dir: Path) -> Dict[str, List[Path]]:
+    found: Dict[str, List[Path]] = {}
+    conv_dir = acp_dir / "conversations"
+    if conv_dir.is_dir():
+        for entry in conv_dir.iterdir():
+            if entry.is_symlink():
+                continue
+            for suf in CONV_SUFFIXES:
+                if entry.name.endswith(suf):
+                    uid = entry.name[: -len(suf)]
+                    if is_uuid(uid):
+                        found.setdefault(uid, []).append(entry)
+                    break
+
+    brain_dir = acp_dir / "brain"
+    if brain_dir.is_dir():
+        for entry in brain_dir.iterdir():
+            if not entry.is_symlink() and entry.is_dir() and is_uuid(entry.name):
+                found.setdefault(entry.name, []).append(entry)
+
+    ann_dir = acp_dir / "annotations"
+    if ann_dir.is_dir():
+        for entry in ann_dir.iterdir():
+            if not entry.is_symlink() and entry.is_file() and entry.name.endswith(".pbtxt"):
+                uid = entry.name[:-6]
+                if is_uuid(uid):
+                    found.setdefault(uid, []).append(entry)
+    return found
+
+
+def measure_paths(paths: List[Path]) -> Tuple[int, float]:
+    total_size = 0
+    latest_mtime = 0.0
+    for p in paths:
+        try:
+            st = p.lstat()
+            latest_mtime = max(latest_mtime, st.st_mtime)
+            if p.is_file():
+                total_size += st.st_size
+            elif p.is_dir() and not p.is_symlink():
+                for root, _dirs, files in os.walk(p):
+                    try:
+                        latest_mtime = max(latest_mtime, os.lstat(root).st_mtime)
+                    except OSError:
+                        pass
+                    for fn in files:
+                        try:
+                            fst = os.lstat(os.path.join(root, fn))
+                            total_size += fst.st_size
+                            latest_mtime = max(latest_mtime, fst.st_mtime)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+    return total_size, latest_mtime
+
+
+def inspect_open_handles(acp_dir: Path) -> Tuple[Set[str], bool, Optional[str]]:
+    lsof_bin = shutil.which("lsof")
+    if not lsof_bin:
+        return set(), True, "lsof not found in PATH"
+    res = subprocess.run([lsof_bin, "-n", "-P", "-F", "n", "+D", str(acp_dir)], capture_output=True, text=True, check=False)
+    if res.returncode not in (0, 1) or (res.returncode == 1 and res.stderr.strip()):
+        return set(), True, res.stderr.strip() or f"lsof exited with code {res.returncode}"
+    open_uuids: Set[str] = set()
+    summaries_open = False
+    for line in res.stdout.splitlines():
+        if not line.startswith("n"):
+            continue
+        p = line[1:]
+        if "conversation_summaries.db" in p:
+            summaries_open = True
+        if "/conversations/" in p or "/brain/" in p or "/annotations/" in p:
+            open_uuids.update(UUID_RE.findall(p))
+    return open_uuids, summaries_open, None
+
+
+def inspect_file_open(path: Path) -> Tuple[bool, Optional[str]]:
+    """Check whether any OTHER process currently holds `path` open via lsof."""
+    lsof_bin = shutil.which("lsof")
+    if not lsof_bin:
+        return True, "lsof not found in PATH"
+    res = subprocess.run([lsof_bin, "-n", "-P", "-F", "p", "--", str(path)], capture_output=True, text=True, check=False)
+    if res.returncode == 1 and not res.stderr.strip():
+        return False, None
+    if res.returncode != 0:
+        return True, res.stderr.strip() or f"lsof exited with code {res.returncode}"
+    my_pid = str(os.getpid())
+    for line in res.stdout.splitlines():
+        if line.startswith("p") and line[1:].strip() != my_pid:
+            return True, None
+    return False, None
+
+
+def is_profile_in_use_by_process(profile_dir: Path) -> bool:
+    ps_bin = shutil.which("ps")
+    if not ps_bin:
+        return True
+    res = subprocess.run([ps_bin, "-e", "-o", "pid=,args="], capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        return True
+    needle = str(profile_dir.resolve())
+    my_pid = os.getpid()
+    for line in res.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == my_pid:
+            continue
+        if needle in parts[1]:
+            return True
+    return False
+
+
+# ------------------------- macOS Trash, Summaries Guard & Backup -------------------------
+
+
+def trash_bin_path() -> Path:
+    """Use Apple's built-in /usr/bin/trash directly to avoid Homebrew/npm trash flag conflicts."""
+    return Path(os.environ.get("T3_CLEAN_TRASH_BIN", "/usr/bin/trash"))
+
+
+def create_staging_bundle(acp_dir: Path, bundle_name: str) -> Tuple[Path, Path]:
+    staging_parent = acp_dir.parent / ".t3-clean-staging"
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    bundle_dir = staging_parent / bundle_name
+    counter = 1
+    while bundle_dir.exists():
+        bundle_dir = staging_parent / f"{bundle_name}-{counter}"
+        counter += 1
+    bundle_dir.mkdir(parents=True, exist_ok=False)
+    return staging_parent, bundle_dir
+
+
+def send_bundle_to_trash(bundle_dir: Path, trash_bin: Path, label: str) -> None:
+    res = subprocess.run([str(trash_bin), "--stopOnError", str(bundle_dir)], capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        detail = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        raise RuntimeError(f"{label} failed: {detail}")
+
+
+def cleanup_empty_staging(staging_parent: Path) -> None:
+    try:
+        if staging_parent.exists() and not any(staging_parent.iterdir()):
+            staging_parent.rmdir()
+    except OSError:
+        pass
+
+
+def scan_staging_leftovers(acp_dir: Path) -> List[Path]:
+    staging_dir = acp_dir.parent / ".t3-clean-staging"
+    if not staging_dir.is_dir() or staging_dir.is_symlink():
+        return []
+    try:
+        return sorted(
+            p for p in staging_dir.iterdir()
+            if not (p.name == ".DS_Store" and not p.is_symlink() and p.is_file())
+        )
+    except OSError:
+        return []
+
+
+def format_staging_warnings(leftovers: Sequence[Path], tr: Translator) -> List[str]:
+    warnings: List[str] = []
+    for entry in leftovers:
+        key = "staging_warn_restore" if (entry.is_dir() and (entry / "restore.sh").is_file()) else "staging_warn_plain"
+        warnings.append(tr(key, path=str(entry)))
+    return warnings
+
+
+def build_restore_script(entries: List[dict]) -> str:
+    """Generate a UUID-grouped restore.sh implementing R05 conflict rules and R16 strict mkdir/mv."""
+    grouped: Dict[str, List[dict]] = {}
+    for item in entries:
+        grouped.setdefault(item["uuid"], []).append(item)
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Generated by t3-clean-agy: restores bundled Antigravity session files.",
+        "# Existing files at target paths are never overwritten; conflicts skip the whole UUID group.",
+        "set -euo pipefail",
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"',
+        "restored=0",
+        "skipped_groups=0",
+        "",
+        "path_exists() {",
+        '  [ -e "$1" ] || [ -L "$1" ]',
+        "}",
+        "",
+    ]
+
+    for uid, group in grouped.items():
+        manifest_dsts = {item["original_path"] for item in group}
+        conv_dir: Optional[Path] = None
+        for item in group:
+            rel = item["bundle_relpath"]
+            orig = Path(item["original_path"])
+            if rel.startswith("conversations/"):
+                conv_dir = orig.parent
+                break
+            if rel.startswith(("brain/", "annotations/")):
+                conv_dir = orig.parent.parent / "conversations"
+        extra_sidecars: List[str] = []
+        if conv_dir is not None:
+            for suf in SQLITE_SIDECAR_SUFFIXES:
+                cand = str(conv_dir / f"{uid}{suf}")
+                if cand not in manifest_dsts:
+                    extra_sidecars.append(cand)
+
+        lines.append(f"# Session {uid}")
+        lines.append("conflict_reason=''")
+        for item in group:
+            src_q = shlex.quote(item["bundle_relpath"])
+            dst_q = shlex.quote(item["original_path"])
+            lines.append(
+                f'if [ -z "$conflict_reason" ] && path_exists "$BUNDLE_DIR/"{src_q} && path_exists {dst_q}; then '
+                f'conflict_reason={dst_q}; fi'
+            )
+        for extra in extra_sidecars:
+            ex_q = shlex.quote(extra)
+            lines.append(
+                f'if [ -z "$conflict_reason" ] && path_exists {ex_q}; then '
+                f'conflict_reason={ex_q}; fi'
+            )
+        lines.append('if [ -n "$conflict_reason" ]; then')
+        lines.append(
+            f'  echo "[skip] session {uid[:8]} conflict at target ($conflict_reason); skipped entire session group"'
+        )
+        lines.append("  skipped_groups=$((skipped_groups + 1))")
+        lines.append("else")
+        for item in group:
+            src_q = shlex.quote(item["bundle_relpath"])
+            dst_q = shlex.quote(item["original_path"])
+            lines.append(f'  if path_exists "$BUNDLE_DIR/"{src_q}; then')
+            lines.append(f'    mkdir -p "$(dirname {dst_q})"')
+            lines.append(f'    mv "$BUNDLE_DIR/"{src_q} {dst_q}')
+            lines.append("    restored=$((restored + 1))")
+            lines.append("  fi")
+        lines.append("fi")
+        lines.append("")
+
+    lines.append('echo "Restored ${restored} item(s), skipped ${skipped_groups} session group(s)."')
+    lines.append('if [ "${skipped_groups}" -gt 0 ]; then')
+    lines.append('  echo "WARNING: skipped session(s) remain only in ${BUNDLE_DIR} — do not delete this directory until resolved."')
+    lines.append("fi")
+    return "\n".join(lines) + "\n"
+
+
+def trash_profile_bundle(
+    acp_dir: Path,
+    sessions: List[SessionRecord],
+    tr: Translator,
+    *,
+    ts: str,
+    multi_profile: bool,
+) -> str:
+    trash_bin = trash_bin_path()
+    if not trash_bin.is_file():
+        raise RuntimeError(f"macOS {trash_bin} (macOS 15+) not found.")
+
+    suffix = f"-{acp_dir.parent.name[:8]}" if multi_profile else ""
+    staging_parent, bundle_dir = create_staging_bundle(acp_dir, f"t3-clean-agy-{ts}{suffix}")
+    acp_resolved = acp_dir.resolve()
+    moved_items: List[Tuple[str, Path, Path]] = []
+    manifest_dsts_by_uid: Dict[str, Set[Path]] = {}
+    conv_dir_by_uid: Dict[str, Path] = {}
+
+    try:
+        planned_moves: List[Tuple[str, Path, Path]] = []
+        manifest_files: List[dict] = []
+        manifest_sessions: List[dict] = []
+        for s in sessions:
+            manifest_sessions.append({
+                "uuid": s.uuid, "category": s.category, "title": session_title(s, tr),
+                "detail": resolve_note(s.detail, tr), "size_bytes": s.size_bytes,
+            })
+            for src in s.paths:
+                if not src.exists() and not src.is_symlink():
+                    continue
+                orig_resolved = src.resolve()
+                rel = orig_resolved.relative_to(acp_resolved)
+                dst = bundle_dir / rel
+                planned_moves.append((s.uuid, src, dst))
+                manifest_dsts_by_uid.setdefault(s.uuid, set()).add(orig_resolved)
+                rel_posix = rel.as_posix()
+                if rel_posix.startswith("conversations/"):
+                    conv_dir_by_uid[s.uuid] = orig_resolved.parent
+                elif s.uuid not in conv_dir_by_uid and rel_posix.startswith(("brain/", "annotations/")):
+                    conv_dir_by_uid[s.uuid] = orig_resolved.parent.parent / "conversations"
+                manifest_files.append({
+                    "uuid": s.uuid, "bundle_relpath": rel_posix, "original_path": str(orig_resolved),
+                })
+
+        # Write manifest.json and restore.sh BEFORE moving any files (R10), inside try (R21).
+        manifest = {
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "acp_dir": str(acp_dir),
+            "session_count": len(sessions),
+            "sessions": manifest_sessions,
+            "files": manifest_files,
+        }
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        restore_path = bundle_dir / "restore.sh"
+        restore_path.write_text(build_restore_script(manifest_files), encoding="utf-8")
+        restore_path.chmod(0o755)
+
+        for uid, src, dst in planned_moves:
+            if not src.exists() and not src.is_symlink():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dst)
+            moved_items.append((uid, src, dst))
+
+        send_bundle_to_trash(bundle_dir, trash_bin, "/usr/bin/trash")
+        return bundle_dir.name
+    except Exception as exc:
+        if not moved_items:
+            shutil.rmtree(bundle_dir, ignore_errors=True)
+            raise
+
+        moved_by_uid: Dict[str, List[Tuple[Path, Path]]] = {}
+        for uid, src, dst in moved_items:
+            moved_by_uid.setdefault(uid, []).append((src, dst))
+
+        failed_rollback: List[Path] = []
+        missing_paths: List[Path] = []
+        for uid, pairs in moved_by_uid.items():
+            # R20: detect files gone from BOTH staging and original location.
+            for src, dst in pairs:
+                dst_here = dst.exists() or dst.is_symlink()
+                src_here = src.exists() or src.is_symlink()
+                if not dst_here and not src_here:
+                    missing_paths.append(src)
+
+            # R19: check UUID-group conflict (same rules as restore.sh) before moving anything back.
+            conflict = any(
+                (dst.exists() or dst.is_symlink()) and (src.exists() or src.is_symlink())
+                for src, dst in pairs
+            )
+            if not conflict and uid in conv_dir_by_uid:
+                conv_dir = conv_dir_by_uid[uid]
+                known = manifest_dsts_by_uid.get(uid, set())
+                for suf in SQLITE_SIDECAR_SUFFIXES:
+                    cand = conv_dir / f"{uid}{suf}"
+                    if cand not in known and (cand.exists() or cand.is_symlink()):
+                        conflict = True
+                        break
+
+            if conflict:
+                for _src, dst in pairs:
+                    if dst.exists() or dst.is_symlink():
+                        failed_rollback.append(dst)
+                continue
+
+            for src, dst in reversed(pairs):
+                if not dst.exists() and not dst.is_symlink():
+                    continue
+                try:
+                    os.rename(dst, src)
+                except OSError:
+                    failed_rollback.append(dst)
+
+        if missing_paths:
+            raise UncertainTrashError(
+                str(exc), bundle_dir.name, missing_paths, bundle_dir if failed_rollback else None
+            ) from exc
+        if failed_rollback:
+            # Preserve bundle_dir with manifest.json & restore.sh so originals are never lost (R01, R19).
+            raise PartialRollbackError(str(exc), bundle_dir, failed_rollback) from exc
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+        raise
+    finally:
+        cleanup_empty_staging(staging_parent)
+
+
+def remove_permanently(paths: List[Path]) -> None:
+    for p in paths:
+        if p.is_symlink() or p.is_file():
+            p.unlink()
+        elif p.is_dir():
+            shutil.rmtree(p)
+
+
+def verify_summaries_contract(conn: sqlite3.Connection) -> None:
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
+    if tables != ["conversation_summaries"]:
+        raise ContractError(
+            f"conversation_summaries.db has unexpected tables ({', '.join(tables) or 'none'}); "
+            "skipped index prune to protect data integrity."
+        )
+    triggers = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()]
+    if triggers:
+        raise ContractError(f"conversation_summaries.db contains trigger(s) ({', '.join(triggers)}); skipped index prune.")
+    if conn.execute("PRAGMA foreign_key_list(conversation_summaries)").fetchall():
+        raise ContractError("conversation_summaries.db has foreign key constraints; skipped index prune.")
+
+
+def backup_summaries_to_trash(acp_dir: Path, *, multi_profile: bool = False) -> str:
+    sdb = acp_dir / "conversation_summaries.db"
+    trash_bin = trash_bin_path()
+    if not trash_bin.is_file():
+        raise RuntimeError(f"macOS {trash_bin} (macOS 15+) not found; refusing to mutate conversation_summaries.db without backup.")
+
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    suffix = f"-{acp_dir.parent.name[:8]}" if multi_profile else ""
+    staging_parent, bundle_dir = create_staging_bundle(acp_dir, f"t3-clean-agy-summaries-backup-{ts}{suffix}")
+    try:
+        src_conn = open_readonly_sqlite(sdb)
+        dst_conn = sqlite3.connect(str(bundle_dir / "conversation_summaries.db"))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+
+        restore_sh = "\n".join([
+            "#!/usr/bin/env bash",
+            "# Generated by t3-clean-agy: restores missing rows into conversation_summaries.db.",
+            "# Quit T3 Code completely before running.",
+            "set -euo pipefail",
+            'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"',
+            'BACKUP="$BUNDLE_DIR/conversation_summaries.db"',
+            f"TARGET={shlex.quote(str(sdb.resolve()))}",
+            'if ! command -v lsof >/dev/null 2>&1; then',
+            '  echo "ERROR: lsof not found; refusing to restore conversation_summaries.db." >&2',
+            "  exit 1",
+            "fi",
+            'if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then',
+            '  err_file="$(mktemp)"',
+            '  trap \'rm -f "$err_file"\' EXIT',
+            "  set +e",
+            '  lsof -n -P -- "$TARGET" >/dev/null 2>"$err_file"',
+            "  lsof_rc=$?",
+            "  set -e",
+            '  lsof_err="$(cat "$err_file")"',
+            '  if [ "$lsof_rc" -eq 0 ]; then',
+            '    echo "ERROR: conversation_summaries.db is open by a process. Quit T3 Code first." >&2',
+            "    exit 1",
+            '  elif [ "$lsof_rc" -ne 1 ] || [ -n "$lsof_err" ]; then',
+            '    echo "ERROR: lsof check failed (exit ${lsof_rc}): ${lsof_err}" >&2',
+            "    exit 1",
+            "  fi",
+            '  python3 - "$BACKUP" "$TARGET" <<\'PY\'',
+            "import sqlite3, sys, urllib.parse",
+            "bak_path, dst_path = sys.argv[1], sys.argv[2]",
+            "conn = sqlite3.connect(dst_path, timeout=5.0, isolation_level=None)",
+            "try:",
+            "    dst_cols = [r[1] for r in conn.execute('PRAGMA table_info(conversation_summaries)').fetchall()]",
+            "    bak_uri = 'file:' + urllib.parse.quote(bak_path, safe='/') + '?mode=ro'",
+            "    bak_conn = sqlite3.connect(bak_uri, uri=True)",
+            "    try:",
+            "        bak_cols = [r[1] for r in bak_conn.execute('PRAGMA table_info(conversation_summaries)').fetchall()]",
+            "    finally:",
+            "        bak_conn.close()",
+            "    if not dst_cols or 'conversation_id' not in dst_cols or set(dst_cols) != set(bak_cols):",
+            "        sys.stderr.write('ERROR: schema mismatch between backup and current conversation_summaries.db.\\n')",
+            "        sys.exit(1)",
+            "    qcols = ', '.join('\"' + c.replace('\"', '\"\"') + '\"' for c in dst_cols)",
+            "    conn.execute('ATTACH DATABASE ? AS bak', (bak_path,))",
+            "    conn.execute('BEGIN IMMEDIATE')",
+            "    try:",
+            "        cur = conn.execute(",
+            "            f'INSERT INTO main.conversation_summaries ({qcols}) '",
+            "            f'SELECT {qcols} FROM bak.conversation_summaries WHERE 1 '",
+            "            'ON CONFLICT(\"conversation_id\") DO NOTHING'",
+            "        )",
+            "        inserted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0",
+            "        conn.execute('COMMIT')",
+            "    except Exception:",
+            "        conn.execute('ROLLBACK')",
+            "        raise",
+            "    print(f'Restored {inserted} missing row(s) into {dst_path}.')",
+            "finally:",
+            "    conn.close()",
+            "PY",
+            "else",
+            '  for sc in "${TARGET}-wal" "${TARGET}-shm" "${TARGET}-journal"; do',
+            '    if [ -e "$sc" ] || [ -L "$sc" ]; then',
+            '      echo "ERROR: target DB is missing but leftover sidecar exists: $sc" >&2',
+            "      exit 1",
+            "    fi",
+            "  done",
+            '  mkdir -p "$(dirname "$TARGET")"',
+            '  cp "$BACKUP" "$TARGET"',
+            '  echo "Restored full snapshot to: $TARGET"',
+            "fi",
+            "",
+        ])
+        restore_path = bundle_dir / "restore.sh"
+        restore_path.write_text(restore_sh, encoding="utf-8")
+        restore_path.chmod(0o755)
+        send_bundle_to_trash(bundle_dir, trash_bin, "backup trash")
+        return bundle_dir.name
+    except Exception:
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+        raise
+    finally:
+        cleanup_empty_staging(staging_parent)
+
+
+def prune_summaries_db(
+    acp_dir: Path, remove_ids: List[str], *, multi_profile: bool = False
+) -> Tuple[int, str, Optional[str]]:
+    sdb = acp_dir / "conversation_summaries.db"
+    if not sdb.is_file() or not remove_ids:
+        return 0, "", None
+    ro_conn = open_readonly_sqlite(sdb)
+    try:
+        verify_summaries_contract(ro_conn)
+    finally:
+        ro_conn.close()
+
+    backup_name = backup_summaries_to_trash(acp_dir, multi_profile=multi_profile)
+    conn = sqlite3.connect(str(sdb), timeout=5.0)
+    try:
+        cur = conn.cursor()
+        deleted = 0
+        try:
+            for i in range(0, len(remove_ids), 400):
+                batch = remove_ids[i : i + 400]
+                cur.execute(
+                    f"DELETE FROM conversation_summaries WHERE conversation_id IN ({','.join('?' for _ in batch)})",
+                    batch,
+                )
+                deleted += cur.rowcount
+            conn.commit()
+        except Exception as exc:
+            raise SummariesPruneError(str(exc), backup_name) from exc
+
+        vacuum_err: Optional[str] = None
+        try:
+            cur.execute("VACUUM")
+        except Exception as exc:
+            vacuum_err = str(exc)
+        return deleted, backup_name, vacuum_err
+    finally:
+        conn.close()
+
+
+# ------------------------- Plan building & live re-verification -------------------------
+
+
+def find_prunable_summary_ids(
+    summaries: Dict[str, SummaryRow],
+    *,
+    active_ids: Set[str],
+    disk_ids: Set[str],
+    deleted_ids: Set[str],
+    superseded_ids: Set[str],
+    cleaned_this_run: Set[str] = frozenset(),
+) -> List[str]:
+    """Q01 narrowed rule: inactive, absent from disk, and backed by T3 evidence, empty shell, or just cleaned."""
+    out: List[str] = []
+    for cid, row in summaries.items():
+        if cid in active_ids or cid in disk_ids:
+            continue
+        if cid in deleted_ids or cid in superseded_ids or cid in cleaned_this_run or row.is_empty_shell:
+            out.append(cid)
+    return sorted(out)
+
+
+def estimate_pruned_summaries(reports: Sequence[ProfileReport], chosen: Sequence[SessionRecord]) -> int:
+    chosen_by_acp: Dict[Path, Set[str]] = {}
+    for s in chosen:
+        chosen_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
+    total = 0
+    for rep in reports:
+        if rep.staging_leftovers:
+            continue
+        ids = set(rep.orphan_summary_ids)
+        ids.update(uid for uid in chosen_by_acp.get(rep.acp_dir, ()) if uid in rep.summary_ids)
+        total += len(ids)
+    return total
+
+
+def build_plan(
+    t3_home: Path,
+    *,
+    include_superseded: bool,
+    include_unknown: bool,
+    min_age_hours: float,
+    skip_lsof: bool,
+) -> Tuple[T3State, List[ProfileReport]]:
+    userdata_dir = t3_home / "userdata"
+    state_db = verify_t3_contract(userdata_dir)
+    state = load_t3_state(state_db)
+    t3_db_open, t3_lsof_err = (False, None) if skip_lsof else inspect_file_open(state_db)
+    profiles = discover_antigravity_profiles(userdata_dir)
+
+    now = time.time()
+    min_age_secs = max(0.0, min_age_hours) * 3600.0
+    reports: List[ProfileReport] = []
+    total_disk_sessions = 0
+    total_active_matches = 0
+
+    for profile_name, acp_dir in profiles:
+        summaries_exists, summaries = read_summary_index(acp_dir)
+        subagent_graph = collect_subagent_graph(acp_dir, summaries)
+        active_map = expand_descendants(state.active_uuids, subagent_graph, "@note_subagent")
+        deleted_map, deleted_ts_map = expand_deleted_descendants(
+            state.deleted_uuids, state.deleted_timestamps, subagent_graph, "@note_del_subagent"
+        )
+        for u in active_map:
+            deleted_map.pop(u, None)
+            deleted_ts_map.pop(u, None)
+
+        disk_map = scan_disk_sessions(acp_dir)
+        total_disk_sessions += len(disk_map)
+        open_uuids, summaries_open, lsof_err = (set(), False, None) if skip_lsof else inspect_open_handles(acp_dir)
+        staging_leftovers = scan_staging_leftovers(acp_dir)
+
+        sessions: List[SessionRecord] = []
+        for uid, paths in disk_map.items():
+            size_bytes, latest_mtime = measure_paths(paths)
+            agy_row = summaries.get(uid)
+            agy_title = agy_row.title if agy_row else ""
+            if uid in active_map:
+                cat, (detail, t3_title) = "ACTIVE", active_map[uid]
+                total_active_matches += 1
+            elif uid in deleted_map:
+                cat, (detail, t3_title) = "DELETED", deleted_map[uid]
+            elif uid in state.superseded_uuids:
+                cat, (detail, t3_title) = "SUPERSEDED", state.superseded_uuids[uid]
+            else:
+                cat, detail, t3_title = "UNKNOWN", "@note_unknown", ""
+
+            locked = uid in open_uuids
+            if min_age_secs <= 0:
+                too_recent = False
+            elif cat == "DELETED":
+                d_ts = deleted_ts_map.get(uid)
+                too_recent = True if d_ts is None else ((now - max(latest_mtime, d_ts)) < min_age_secs)
+            else:
+                too_recent = (now - latest_mtime) < min_age_secs
+
+            eligible = (
+                cat == "DELETED"
+                or (cat == "SUPERSEDED" and include_superseded)
+                or (cat == "UNKNOWN" and include_unknown)
+            )
+            skip_reason = "@note_locked" if (eligible and locked) else ("@note_cooldown" if (eligible and too_recent) else None)
+            selected = eligible and skip_reason is None
+
+            sessions.append(SessionRecord(
+                profile_name, acp_dir, uid, cat, detail, pick_best_title(t3_title, agy_title),
+                sorted(paths), size_bytes, latest_mtime, locked, too_recent, selected, skip_reason,
+            ))
+
+        order = {"DELETED": 0, "SUPERSEDED": 1, "UNKNOWN": 2, "ACTIVE": 3}
+        sessions.sort(key=lambda s: (order[s.category], -s.size_bytes))
+        orphan_summary_ids = find_prunable_summary_ids(
+            summaries,
+            active_ids=set(active_map),
+            disk_ids=set(disk_map),
+            deleted_ids=set(deleted_map),
+            superseded_ids=set(state.superseded_uuids),
+        )
+
+        reports.append(ProfileReport(
+            profile_name, acp_dir, sessions, orphan_summary_ids, set(summaries.keys()),
+            summaries_exists, summaries_open, staging_leftovers, lsof_err, t3_db_open, t3_lsof_err,
+        ))
+
+    if state.has_live_antigravity_threads and total_disk_sessions > 0 and total_active_matches == 0:
+        raise ContractError(
+            f"Safety circuit breaker triggered: T3 reports live Antigravity threads and "
+            f"{total_disk_sessions} session(s) exist on disk, but 0 matched the active whitelist."
+        )
+    return state, reports
+
+
+def reverify_before_execute(
+    t3_home: Path, tr: Translator, chosen: List[SessionRecord], *, skip_lsof: bool, min_age_hours: float = 24.0
+) -> Tuple[List[SessionRecord], List[Tuple[SessionRecord, str]]]:
+    if not chosen:
+        return [], []
+    _, fresh_reports = build_plan(
+        t3_home, include_superseded=True, include_unknown=True, min_age_hours=min_age_hours, skip_lsof=skip_lsof
+    )
+    fresh_by_key = {(rep.acp_dir, s.uuid): s for rep in fresh_reports for s in rep.sessions}
+    lsof_errors = {rep.acp_dir: rep.lsof_error for rep in fresh_reports}
+
+    approved: List[SessionRecord] = []
+    blocked: List[Tuple[SessionRecord, str]] = []
+    for s in chosen:
+        err = lsof_errors.get(s.acp_dir)
+        if err and not skip_lsof:
+            blocked.append((s, f"lsof ({err})"))
+            continue
+        cur = fresh_by_key.get((s.acp_dir, s.uuid))
+        if cur is None:
+            blocked.append((s, tr("rev_removed")))
+        elif cur.category == "ACTIVE":
+            blocked.append((s, tr("rev_active")))
+        elif cur.category != s.category:
+            blocked.append((s, tr("rev_cat_changed", old=s.category, new=cur.category)))
+        elif cur.locked:
+            blocked.append((s, tr("rev_locked")))
+        elif cur.latest_mtime > s.latest_mtime:
+            blocked.append((s, tr("rev_modified")))
+        elif not s.too_recent and cur.too_recent:
+            blocked.append((s, tr("rev_cooldown")))
+        else:
+            s.paths, s.size_bytes = cur.paths, cur.size_bytes
+            approved.append(s)
+    return approved, blocked
+
+
+# ------------------------- Shared Table Helpers -------------------------
+
+
+def session_badge(s: SessionRecord, tr: Translator) -> Tuple[str, str]:
+    if s.category == "ACTIVE":
+        return tr("b_active"), "green"
+    if s.locked:
+        return tr("b_locked"), "yellow"
+    if s.category == "DELETED":
+        return tr("b_deleted"), "yellow"
+    if s.category == "SUPERSEDED":
+        return tr("b_super"), "lavender"
+    return tr("b_unknown"), "cyan"
+
+
+def session_note(s: SessionRecord, tr: Translator) -> str:
+    if s.locked:
+        return tr("note_locked")
+    if s.skip_reason:
+        return resolve_note(s.skip_reason, tr)
+    if s.too_recent and s.category != "ACTIVE":
+        return tr("note_cooldown")
+    return resolve_note(s.detail, tr)
+
+
+def colorize(st: Style, color: str, text: str) -> str:
+    return getattr(st, {"red": "bold_red", "accent": "accent_bold"}.get(color, color), st.subtle)(text)
+
+
+def make_session_tuples(
+    items: Sequence[SessionRecord], now: float, tr: Translator, override_badge: Optional[str] = None
+) -> List[Tuple[str, str, str, str, str, str]]:
+    return [
+        (
+            override_badge or session_badge(s, tr)[0],
+            s.uuid[:8],
+            format_bytes(s.size_bytes),
+            format_age(s.latest_mtime, now),
+            session_note(s, tr),
+            session_title(s, tr),
+        )
+        for s in items
+    ]
+
+
+def compute_table_widths(
+    rows: Sequence[Tuple[str, str, str, str, str, str]], total_w: int, prefix_w: int, tr: Translator
+) -> Tuple[int, int, int, int, int, int]:
+    badge_w = max(display_width(tr("col_status")), *(display_width(r[0]) for r in rows)) if rows else display_width(tr("col_status"))
+    badge_w = min(max(badge_w, 6), 10)
+    note_w = max(display_width(tr("col_note")), *(display_width(r[4]) for r in rows)) if rows else display_width(tr("col_note"))
+    note_w = min(max(note_w, 8), 14)
+    uid_w, size_w, age_w = 8, 9, 5
+    title_w = max(14, total_w - (prefix_w + badge_w + uid_w + size_w + age_w + note_w + 10))
+    return badge_w, uid_w, size_w, age_w, note_w, title_w
+
+
+def format_table_header(prefix: str, widths: Tuple[int, int, int, int, int, int], tr: Translator) -> str:
+    bw, uw, sw, aw, nw, _ = widths
+    return (
+        f"{prefix}{pad_right(tr('col_status'), bw)}  {pad_right(tr('col_id'), uw)}  "
+        f"{pad_left(tr('col_size'), sw)}  {pad_left(tr('col_age'), aw)}  "
+        f"{pad_right(tr('col_note'), nw)}  {tr('col_title')}"
+    )
+
+
+def format_plain_session_row(
+    st: Style,
+    s: SessionRecord,
+    t: Tuple[str, str, str, str, str, str],
+    widths: Tuple[int, int, int, int, int, int],
+    tr: Translator,
+    override_badge: Optional[Tuple[str, str]] = None,
+) -> str:
+    bw, uw, sw, aw, nw, tw = widths
+    b_txt, b_col = override_badge if override_badge else session_badge(s, tr)
+    return (
+        f"    {colorize(st, b_col, pad_right(b_txt, bw))}  {st.dim(pad_right(t[1], uw))}  "
+        f"{pad_left(t[2], sw)}  {st.dim(pad_left(t[3], aw))}  "
+        f"{st.subtle(pad_right(t[4], nw))}  {truncate_width(t[5], tw)}"
+    )
+
+
+# ------------------------- CLI Static Report -------------------------
+
+
+def print_report(reports: List[ProfileReport], args: argparse.Namespace, st: Style, tr: Translator) -> None:
+    now = time.time()
+    width = term_width()
+    inner_w = width - 6
+    mode_label = (
+        st.bold_red(tr("cli_apply_perm")) if (args.apply and args.permanent)
+        else (st.bold_cyan(tr("cli_apply_trash")) if args.apply else st.accent_bold(tr("cli_preview")))
+    )
+    meta = st.subtle(tr(
+        "cli_meta", h=f"{args.min_age:g}",
+        s=tr("on") if args.include_superseded else tr("off"),
+        u=tr("on") if args.include_unknown else tr("off"),
+    ))
+    print()
+    print(box_top(st, inner_w))
+    print(box_split_row(st, st.accent("◆ ") + st.hi("t3-clean-agy") + "  " + mode_label, meta, inner_w))
+    print(box_bottom(st, inner_w))
+
+    if not reports:
+        print(f"\n  {st.subtle(tr('no_profiles'))}")
+        return
+
+    for rep in reports:
+        all_s = rep.sessions
+        total_bytes = sum(s.size_bytes for s in all_s)
+        to_clean = [s for s in all_s if s.selected]
+        skipped = [s for s in all_s if s.skip_reason is not None]
+        report_only = [s for s in all_s if s.category in ("SUPERSEDED", "UNKNOWN") and not s.selected and s.skip_reason is None]
+        active = [s for s in all_s if s.category == "ACTIVE"]
+        sel_bytes = sum(s.size_bytes for s in to_clean)
+
+        print(f"\n  {st.hi('Profile')} {st.accent(rep.profile_name[:12])}  " + st.subtle(f"({tr('sessions_cnt', n=len(all_s))} · {format_bytes(total_bytes)})"))
+        if rep.lsof_error:
+            print(f"  {st.yellow('⚠ lsof: ' + rep.lsof_error)}")
+        if rep.staging_leftovers:
+            for warn in format_staging_warnings(rep.staging_leftovers, tr):
+                print(f"  {st.yellow('⚠ ' + warn)}")
+
+        def render_section(title: str, items: List[SessionRecord], color: str, badge: Optional[str] = None) -> None:
+            if not items:
+                return
+            print(f"\n  {colorize(st, color, '● ' + title)} " + st.subtle(f"({len(items)} · {format_bytes(sum(s.size_bytes for s in items))})"))
+            tuples = make_session_tuples(items, now, tr, badge)
+            widths = compute_table_widths(tuples, width - 2, 4, tr)
+            ov = (badge, color) if badge else None
+            for s, t in zip(items, tuples):
+                print(format_plain_session_row(st, s, t, widths, tr, ov))
+
+        render_section(tr("sec_clean"), to_clean, "red" if args.permanent else "yellow", tr("b_perm") if args.permanent else tr("b_trash"))
+        render_section(tr("sec_skip"), skipped, "yellow", tr("b_skip"))
+        render_section(tr("sec_report"), report_only, "lavender")
+
+        act_bytes = sum(s.size_bytes for s in active)
+        if args.verbose and active:
+            render_section(tr("sec_active"), active, "green")
+        else:
+            print(f"\n  {st.green('✓')} {tr('sec_active')}：{st.hi(str(len(active)))} ({format_bytes(act_bytes)})  " + st.dim(f"[{tr('cli_expand_hint')}]"))
+
+        free_txt = st.green(f"({tr('cli_free_est', sz=format_bytes(sel_bytes))})") if sel_bytes > 0 else st.dim(f"({tr('cli_no_free')})")
+        print(f"\n  {st.subtle(tr('cli_space') + '：')}{format_bytes(total_bytes)}  →  {st.hi(format_bytes(total_bytes - sel_bytes))}  {free_txt}")
+        if rep.summaries_db_exists:
+            n_idx = len(rep.orphan_summary_ids)
+            print(f"  {st.subtle(tr('cli_idx_left', n=n_idx) if n_idx > 0 else tr('cli_idx_clean'))}")
+
+
+# ------------------------- Modern Arrow-Key TUI -------------------------
+
+
+_ACTIVE_WINCH_FD: Optional[int] = None
+_CSI_KEYS = {
+    b"A": "up", b"B": "down", b"C": "right", b"D": "left",
+    b"5~": "pgup", b"6~": "pgdn",
+    b"H": "home", b"1~": "home", b"7~": "home",
+    b"F": "end", b"4~": "end", b"8~": "end",
+}
+_SS3_KEYS = {b"A": "up", b"B": "down", b"C": "right", b"D": "left", b"H": "home", b"F": "end"}
+
+
+def _drain_fd(fd: int) -> None:
+    while select.select([fd], [], [], 0.0)[0]:
+        try:
+            if not os.read(fd, 64):
+                return
+        except OSError:
+            return
+
+
+def read_key() -> str:
+    fd = sys.stdin.fileno()
+    winch_fd = _ACTIVE_WINCH_FD
+    watch = [fd, winch_fd] if winch_fd is not None else [fd]
+
+    while True:
+        try:
+            ready, _, _ = select.select(watch, [], [])
+        except InterruptedError:
+            continue
+        if winch_fd is not None and winch_fd in ready:
+            _drain_fd(winch_fd)
+            return "resize"
+        if fd in ready:
+            break
+
+    try:
+        ch = os.read(fd, 1)
+    except InterruptedError:
+        return "resize"
+    if not ch:
+        return "q"
+    if ch == b"\x03":
+        return "ctrl_c"
+    if ch in (b"\r", b"\n"):
+        return "enter"
+    if ch == b" ":
+        return "space"
+    if ch == b"\x1b":
+        if not select.select([fd], [], [], 0.05)[0]:
+            return "esc"
+        b1 = os.read(fd, 1)
+        if b1 == b"[":
+            seq = bytearray()
+            for _ in range(32):
+                if not select.select([fd], [], [], 0.03)[0]:
+                    break
+                bn = os.read(fd, 1)
+                if not bn:
+                    break
+                seq.extend(bn)
+                if 0x40 <= bn[0] <= 0x7E:
+                    break
+            return _CSI_KEYS.get(bytes(seq), "")
+        if b1 == b"O":
+            return _SS3_KEYS.get(os.read(fd, 1), "") if select.select([fd], [], [], 0.03)[0] else ""
+        return ""
+
+    if ch[0] >= 0xC0:
+        extra = 1 if ch[0] < 0xE0 else (2 if ch[0] < 0xF0 else 3)
+        for _ in range(extra):
+            if not select.select([fd], [], [], 0.02)[0]:
+                break
+            os.read(fd, 1)
+        return ""
+    return ch.decode("ascii", errors="ignore").lower()
+
+
+def paint_screen(lines: List[str]) -> None:
+    sys.stdout.write("\x1b[H" + "\r\n".join(line + "\x1b[K" for line in lines) + "\x1b[K\x1b[J")
+    sys.stdout.flush()
+
+
+class RawTerminalSession:
+    def __init__(self) -> None:
+        self.fd = sys.stdin.fileno()
+        self.old_settings = None
+        self.winch_r: Optional[int] = None
+        self.winch_w: Optional[int] = None
+        self.prev_winch = None
+        self.prev_active_winch: Optional[int] = None
+
+    def __enter__(self) -> "RawTerminalSession":
+        global _ACTIVE_WINCH_FD
+        self.old_settings = termios.tcgetattr(self.fd)
+        tty.setcbreak(self.fd)
+        if hasattr(signal, "SIGWINCH"):
+            r_fd, w_fd = os.pipe()
+            os.set_blocking(r_fd, False)
+            os.set_blocking(w_fd, False)
+            self.winch_r, self.winch_w = r_fd, w_fd
+            self.prev_winch = signal.getsignal(signal.SIGWINCH)
+
+            def _on_winch(_sig: int, _frame: object) -> None:
+                if self.winch_w is not None:
+                    try:
+                        os.write(self.winch_w, b"R")
+                    except OSError:
+                        pass
+
+            signal.signal(signal.SIGWINCH, _on_winch)
+            self.prev_active_winch = _ACTIVE_WINCH_FD
+            _ACTIVE_WINCH_FD = r_fd
+        sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J")
+        sys.stdout.flush()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        global _ACTIVE_WINCH_FD
+        if self.prev_winch is not None and hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, self.prev_winch)
+            self.prev_winch = None
+        if self.winch_r is not None:
+            _ACTIVE_WINCH_FD = self.prev_active_winch
+        for fd_attr in ("winch_r", "winch_w"):
+            val = getattr(self, fd_attr)
+            if val is not None:
+                try:
+                    os.close(val)
+                except OSError:
+                    pass
+                setattr(self, fd_attr, None)
+        if self.old_settings is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+
+
+def tui_per_session_selector(
+    reports: List[ProfileReport], args: argparse.Namespace, st: Style, tr: Translator
+) -> Optional[Tuple[List[SessionRecord], bool]]:
+    all_sessions = [s for rep in reports for s in rep.sessions]
+    checked: Set[Tuple[Path, str]] = {(s.acp_dir, s.uuid) for s in all_sessions if s.selected}
+    prune_summaries = args.prune_summaries
+    show_active = args.verbose
+    cursor = 0
+    now = time.time()
+
+    while True:
+        rows = all_sessions if show_active else [s for s in all_sessions if s.category != "ACTIVE"]
+        cursor = max(0, min(cursor, len(rows) - 1)) if rows else 0
+        width = term_width()
+        inner_w = width - 6
+        term_rows = max(18, shutil.get_terminal_size((92, 24)).lines)
+
+        footer_lines = format_footer_lines(
+            st,
+            [
+                ("↑↓", tr("k_move")), ("Space", tr("k_toggle")), ("a", tr("k_all_del")),
+                ("n", tr("k_none")), ("s", tr("k_hide_act") if show_active else tr("k_show_act")),
+                ("p", tr("k_idx")), ("l", tr("k_lang")), ("Enter", tr("k_next")), ("Esc", tr("k_back")),
+            ],
+            width, margin="    ",
+        )
+        max_list_lines = max(5, term_rows - 12 - len(footer_lines))
+        chosen_objs = [s for s in all_sessions if (s.acp_dir, s.uuid) in checked]
+        est_idx = estimate_pruned_summaries(reports, chosen_objs)
+
+        start = max(0, min(cursor - max_list_lines // 2, len(rows) - max_list_lines)) if len(rows) > max_list_lines else 0
+        end = min(len(rows), start + max_list_lines)
+
+        buf = [
+            "",
+            box_top(st, inner_w),
+            box_split_row(
+                st, st.accent("◆ ") + st.hi(tr("v_custom_title")),
+                st.subtle(f"{format_bytes(sum(s.size_bytes for s in all_sessions))} · {tr('sessions_cnt', n=len(all_sessions))}"),
+                inner_w,
+            ),
+            box_split_row(
+                st,
+                st.accent_bold(tr("v_custom_selected", n=len(chosen_objs), sz=format_bytes(sum(s.size_bytes for s in chosen_objs)))),
+                st.yellow(tr("v_custom_idx_on", n=est_idx)) if prune_summaries else st.dim(tr("v_custom_idx_off", n=est_idx)),
+                inner_w,
+            ),
+            box_bottom(st, inner_w),
+            "",
+        ]
+
+        if not rows:
+            buf.append(f"    {st.subtle(tr('v_custom_empty' if all_sessions else 'v_details_empty'))}")
+        else:
+            tuples = make_session_tuples(rows, now, tr)
+            widths = compute_table_widths(tuples, width - 2, 8, tr)
+            bw, uw, sw, aw, nw, tw = widths
+            buf.append(st.dim(format_table_header("        ", widths, tr)))
+
+            for idx in range(start, end):
+                s, t = rows[idx], tuples[idx]
+                is_cur = idx == cursor
+                is_checked = (s.acp_dir, s.uuid) in checked
+                dot = st.dim("·") if not s.selectable_in_tui else (
+                    (st.bold_red("◉") if args.permanent else st.yellow("◉")) if is_checked else st.subtle("○")
+                )
+                ptr = st.accent_bold("❯ ") if is_cur else "  "
+                title_str = truncate_width(t[5], tw)
+                cells = (pad_right(t[0], bw), pad_right(t[1], uw), pad_left(t[2], sw), pad_left(t[3], aw), pad_right(t[4], nw), title_str)
+
+                if is_cur:
+                    fns = (st.accent_bold, st.accent, st.hi, st.subtle, st.subtle, st.subtle if not s.selectable_in_tui else st.hi)
+                elif not s.selectable_in_tui:
+                    fns = (st.dim,) * 6
+                elif is_checked:
+                    cf = st.red if args.permanent else st.yellow
+                    fns = (cf, st.subtle, cf, st.dim, st.subtle, cf)
+                else:
+                    _, b_col = session_badge(s, tr)
+                    fns = (lambda x, c=b_col: colorize(st, c, x), st.dim, st.subtle, st.dim, st.dim, lambda x: x)
+
+                styled = [fn(val) for fn, val in zip(fns, cells)]
+                buf.append(f"    {ptr}{dot} " + "  ".join(styled))
+
+            if len(rows) > max_list_lines:
+                buf.append(f"    {st.dim(f'{start + 1}–{end} / {len(rows)}')}")
+
+        buf.append("")
+        buf.extend(footer_lines)
+        paint_screen(buf)
+
+        k = read_key()
+        if k in ("esc", "q", "ctrl_c"):
+            return None
+        if k == "l":
+            tr.toggle_and_save()
+        elif k in ("up", "k") and rows:
+            cursor = (cursor - 1) % len(rows)
+        elif k in ("down", "j") and rows:
+            cursor = (cursor + 1) % len(rows)
+        elif k == "home" and rows:
+            cursor = 0
+        elif k == "end" and rows:
+            cursor = len(rows) - 1
+        elif k == "pgup" and rows:
+            cursor = max(0, cursor - max_list_lines)
+        elif k == "pgdn" and rows:
+            cursor = min(len(rows) - 1, cursor + max_list_lines)
+        elif k == "space" and rows and rows[cursor].selectable_in_tui:
+            key_id = (rows[cursor].acp_dir, rows[cursor].uuid)
+            checked.symmetric_difference_update({key_id})
+        elif k == "a":
+            checked.update((s.acp_dir, s.uuid) for s in all_sessions if s.category == "DELETED" and s.selectable_in_tui)
+        elif k == "n":
+            checked.clear()
+        elif k == "s":
+            show_active, cursor = not show_active, 0
+        elif k == "p":
+            prune_summaries = not prune_summaries
+        elif k == "enter":
+            return [s for s in all_sessions if (s.acp_dir, s.uuid) in checked], prune_summaries
+
+
+def tui_view_all_sessions(reports: List[ProfileReport], st: Style, tr: Translator) -> None:
+    all_sessions = [s for rep in reports for s in rep.sessions]
+    total_bytes = sum(s.size_bytes for s in all_sessions)
+    now, offset = time.time(), 0
+
+    while True:
+        width = term_width()
+        inner_w = width - 6
+        page_size = max(6, max(18, shutil.get_terminal_size((92, 24)).lines) - 11)
+        max_offset = max(0, len(all_sessions) - page_size)
+        offset = max(0, min(offset, max_offset))
+
+        buf = [
+            "",
+            box_top(st, inner_w),
+            box_split_row(
+                st, st.accent("◆ ") + st.hi(tr("v_details_title")),
+                st.subtle(f"{format_bytes(total_bytes)} · {tr('sessions_cnt', n=len(all_sessions))}"),
+                inner_w,
+            ),
+            box_bottom(st, inner_w),
+            "",
+        ]
+        if not all_sessions:
+            buf.append(f"    {st.subtle(tr('v_details_empty'))}")
+        else:
+            tuples = make_session_tuples(all_sessions, now, tr)
+            widths = compute_table_widths(tuples, width - 2, 4, tr)
+            buf.append(st.dim(format_table_header("    ", widths, tr)))
+            end = min(len(all_sessions), offset + page_size)
+            for idx in range(offset, end):
+                buf.append(format_plain_session_row(st, all_sessions[idx], tuples[idx], widths, tr))
+            if len(all_sessions) > page_size:
+                buf.append(f"    {st.dim(f'{offset + 1}–{end} / {len(all_sessions)}')}")
+
+        buf.append("")
+        buf.extend(format_footer_lines(st, [("↑↓", tr("k_scroll")), ("l", tr("k_lang")), ("Esc / Enter", tr("k_back"))], width, margin="    "))
+        paint_screen(buf)
+
+        k = read_key()
+        if k in ("esc", "q", "enter", "ctrl_c"):
+            return
+        if k == "l":
+            tr.toggle_and_save()
+        elif k in ("up", "k"):
+            offset = max(0, offset - 1)
+        elif k in ("down", "j"):
+            offset = min(max_offset, offset + 1)
+        elif k == "home":
+            offset = 0
+        elif k == "end":
+            offset = max_offset
+        elif k == "pgup":
+            offset = max(0, offset - page_size)
+        elif k == "pgdn":
+            offset = min(max_offset, offset + page_size)
+
+
+def tui_confirm_cleanup(
+    chosen: List[SessionRecord], *, prune_summaries: bool, orphan_summary_count: int, permanent: bool, st: Style, tr: Translator
+) -> bool:
+    total_bytes = sum(s.size_bytes for s in chosen)
+    focus, offset = 1, 0  # default to Cancel to prevent accidental double-Enter
+
+    while True:
+        width = term_width()
+        inner_w = width - 6
+        max_items = max(4, max(18, shutil.get_terminal_size((92, 24)).lines) - 15)
+        max_offset = max(0, len(chosen) - max_items)
+        offset = max(0, min(offset, max_offset))
+
+        h_left = st.bold_red("◆ " + tr("v_confirm_title_perm")) if permanent else (st.accent("◆ ") + st.hi(tr("v_confirm_title")))
+        h_right = st.red(tr("v_confirm_sub_perm")) if permanent else st.subtle(tr("v_confirm_sub_trash"))
+        buf = ["", box_top(st, inner_w), box_split_row(st, h_left, h_right, inner_w), box_row(st, "", inner_w)]
+
+        if chosen:
+            buf.append(box_row(st, tr("v_confirm_body", n=st.hi(str(len(chosen))), sz=st.green(format_bytes(total_bytes))), inner_w))
+            if offset > 0:
+                buf.append(box_row(st, st.dim(f"  ↑ +{offset}"), inner_w))
+            for s in chosen[offset : offset + max_items]:
+                b_txt, b_col = session_badge(s, tr)
+                bw = min(8, max(6, display_width(b_txt)))
+                t_w = max(16, inner_w - 30 - bw)
+                row_txt = (
+                    f"{colorize(st, b_col, '•')} {st.dim(s.uuid[:8])}  "
+                    f"{st.hi(pad_left(format_bytes(s.size_bytes), 9))}  "
+                    f"{colorize(st, b_col, pad_right(b_txt, bw))}  "
+                    f"{truncate_width(session_title(s, tr), t_w)}"
+                )
+                buf.append(box_row(st, row_txt, inner_w))
+            if (rem := len(chosen) - (offset + max_items)) > 0:
+                buf.append(box_row(st, st.dim(f"  ↓ +{rem}"), inner_w))
+
+        if prune_summaries:
+            buf.append(box_row(st, f"{st.lavender('•')} " + tr("v_confirm_idx", n=st.hi(str(orphan_summary_count))), inner_w))
+        buf.extend([box_bottom(st, inner_w), ""])
+
+        opts = ((tr("v_confirm_ok_perm") if permanent else tr("v_confirm_ok"), permanent), (tr("v_confirm_cancel"), False))
+        for idx, (label, is_danger) in enumerate(opts):
+            if focus == idx:
+                fn = st.bold_red if is_danger else st.accent_bold
+                buf.append(f"  {fn('❯ ')}{fn(label)}")
+            else:
+                buf.append(f"    {st.subtle(label)}")
+
+        buf.append("")
+        buf.extend(format_footer_lines(
+            st,
+            [("↑↓", tr("k_select")), ("Enter", tr("k_confirm")), ("y", tr("k_quick_y")), ("l", tr("k_lang")), ("Esc", tr("k_back"))],
+            width, margin="    ",
+        ))
+        paint_screen(buf)
+
+        k = read_key()
+        if k in ("esc", "q", "n", "ctrl_c"):
+            return False
+        if k == "l":
+            tr.toggle_and_save()
+        elif k in ("up", "down", "left", "right", "j", "k"):
+            focus = 1 - focus
+        elif k == "pgup":
+            offset = max(0, offset - max_items)
+        elif k == "pgdn":
+            offset = min(max_offset, offset + max_items)
+        elif k == "y":
+            return True
+        elif k == "enter":
+            return focus == 0
+
+
+@dataclass
+class MenuSnapshot:
+    all_sessions: List[SessionRecord]
+    total_bytes: int
+    active: List[SessionRecord]
+    del_old: List[SessionRecord]
+    del_recent: List[SessionRecord]
+    del_locked: List[SessionRecord]
+    superseded: List[SessionRecord]
+    unknown: List[SessionRecord]
+    orphan_summary_cnt: int
+    prunable_orphan_cnt: int
+    any_summaries_db: bool
+    staging_warnings: List[Tuple[Path, List[Path]]]
+    profiles_busy: bool
+
+    @property
+    def std_targets(self) -> List[SessionRecord]:
+        return self.del_old
+
+    @property
+    def deep_targets(self) -> List[SessionRecord]:
+        return self.del_old + self.del_recent + self.superseded
+
+
+def build_menu_snapshot(reports: Sequence[ProfileReport]) -> MenuSnapshot:
+    all_s = [s for rep in reports for s in rep.sessions]
+    busy = any(
+        rep.t3_db_open
+        or rep.t3_lsof_error
+        or rep.lsof_error
+        or rep.summaries_open
+        or is_profile_in_use_by_process(rep.acp_dir.parent)
+        for rep in reports
+    )
+    return MenuSnapshot(
+        all_sessions=all_s,
+        total_bytes=sum(s.size_bytes for s in all_s),
+        active=[s for s in all_s if s.category == "ACTIVE"],
+        del_old=[s for s in all_s if s.category == "DELETED" and not s.locked and not s.too_recent],
+        del_recent=[s for s in all_s if s.category == "DELETED" and not s.locked and s.too_recent],
+        del_locked=[s for s in all_s if s.category != "ACTIVE" and s.locked],
+        superseded=[s for s in all_s if s.category == "SUPERSEDED" and not s.locked],
+        unknown=[s for s in all_s if s.category == "UNKNOWN" and not s.locked],
+        orphan_summary_cnt=sum(len(r.orphan_summary_ids) for r in reports),
+        prunable_orphan_cnt=sum(len(r.orphan_summary_ids) for r in reports if not r.staging_leftovers),
+        any_summaries_db=any(r.summaries_db_exists for r in reports),
+        staging_warnings=[(r.acp_dir, r.staging_leftovers) for r in reports if r.staging_leftovers],
+        profiles_busy=busy,
+    )
+
+
+def _render_home_card(
+    snap: MenuSnapshot, h_str: str, permanent: bool, inner_w: int, st: Style, tr: Translator
+) -> List[str]:
+    body_w = inner_w - 4
+    fmt_pair = lambda items: f"{tr('items_cnt', n=len(items))} · {format_bytes(sum(s.size_bytes for s in items))}"
+
+    mode_badge = (
+        st.bold_red(tr("mode_perm")) if permanent
+        else st.subtle(tr("mode_trash") if body_w >= 68 else tr("mode_trash_short"))
+    )
+    sub = tr("app_sub") if body_w >= 64 else tr("app_sub_short")
+    buf = [
+        "",
+        box_top(st, inner_w),
+        box_split_row(st, st.accent("◆ ") + st.hi("t3-clean-agy") + st.subtle(f"  {sub}"), mode_badge, inner_w),
+        box_row(st, "", inner_w),
+    ]
+
+    act_bytes = sum(s.size_bytes for s in snap.active)
+    del_bytes = sum(s.size_bytes for s in snap.del_old + snap.del_recent)
+    other_bytes = sum(s.size_bytes for s in snap.superseded + snap.unknown + snap.del_locked)
+    left_total = st.hi(format_bytes(snap.total_bytes)) + st.subtle(f" · {tr('sessions_cnt', n=len(snap.all_sessions))}")
+
+    if snap.total_bytes == 0:
+        buf.append(box_split_row(st, left_total, st.subtle(tr("status_empty")), inner_w))
+    elif del_bytes + other_bytes == 0:
+        clean_badge = st.green(tr("status_all_clean") if body_w >= 62 else tr("status_all_clean_short"))
+        buf.append(box_split_row(st, left_total, clean_badge, inner_w))
+    else:
+        act_p, del_p, oth_p = fmt_pct(act_bytes, snap.total_bytes), fmt_pct(del_bytes, snap.total_bytes), fmt_pct(other_bytes, snap.total_bytes)
+        parts = [f"{st.green('●')} {tr('legend_active')} {act_p}"]
+        if del_bytes > 0:
+            parts.append(f"{st.yellow('●')} {tr('legend_clean')} {del_p}")
+        if other_bytes > 0:
+            parts.append(f"{st.lavender('●')} {tr('legend_other')} {oth_p}")
+        legend = "   ".join(parts)
+        if display_width(left_total) + 2 + display_width(legend) > body_w:
+            legend = "  ".join(parts)
+        if display_width(left_total) + 2 + display_width(legend) <= body_w:
+            buf.append(box_split_row(st, left_total, legend, inner_w))
+        else:
+            buf.extend([box_row(st, left_total, inner_w), box_row(st, legend, inner_w)])
+        pct_lbl = st.yellow(tr("bar_reclaimable", pct=del_p)) if del_bytes > 0 else st.lavender(tr("bar_inactive", pct=oth_p))
+        bar_w = max(18, min(40, body_w - display_width(pct_lbl) - 3))
+        buf.append(box_row(st, f"{render_storage_bar(st, bar_w, act_bytes, del_bytes, other_bytes)}   {pct_lbl}", inner_w))
+
+    buf.append(box_row(st, "", inner_w))
+
+    col_sep = st.border("   │   ")
+    half_w = (body_w - 7) // 2
+    right_w = body_w - 7 - half_w
+
+    idx_cell = ""
+    if snap.any_summaries_db:
+        n_idx = snap.prunable_orphan_cnt
+        staging_blocked = snap.orphan_summary_cnt > 0 and n_idx == 0
+        if staging_blocked:
+            idx_state, idx_val, idx_style = tr("idx_staging"), f"{snap.orphan_summary_cnt} · {tr('idx_staging')}", st.subtle
+        elif n_idx > 0 and snap.profiles_busy:
+            idx_state, idx_val, idx_style = tr("idx_busy"), f"{n_idx} · {tr('idx_busy')}", st.subtle
+        elif n_idx > 0:
+            idx_state, idx_val, idx_style = tr("idx_ready"), f"{n_idx} · {tr('idx_ready')}", st.lavender
+        else:
+            idx_state, idx_val, idx_style = tr("idx_clean"), tr("idx_clean"), None
+        idx_cell = flex_metric_cell(st, tr("m_index"), idx_val, right_w, idx_style)
+
+    metric_rows = (
+        (
+            flex_metric_cell(st, tr("m_del_old", h=h_str), fmt_pair(snap.del_old), half_w, st.yellow if snap.del_old else None),
+            flex_metric_cell(st, tr("m_active"), fmt_pair(snap.active), right_w, st.green if snap.active else None),
+        ),
+        (
+            flex_metric_cell(st, tr("m_del_new", h=h_str), fmt_pair(snap.del_recent), half_w, st.yellow if snap.del_recent else None),
+            flex_metric_cell(st, tr("m_super"), fmt_pair(snap.superseded), right_w, st.lavender if snap.superseded else None),
+        ),
+        (
+            flex_metric_cell(st, tr("m_unknown"), fmt_pair(snap.unknown), half_w, st.cyan if snap.unknown else None),
+            idx_cell,
+        ),
+    )
+    buf.extend(box_row(st, left + col_sep + right, inner_w) for left, right in metric_rows)
+    if snap.del_locked:
+        buf.append(box_row(st, st.yellow("⚠ " + tr("locked_warn", n=len(snap.del_locked))), inner_w))
+    for _acp_dir, leftovers in snap.staging_warnings:
+        for warn in format_staging_warnings(leftovers, tr):
+            for wl in wrap_display_lines("⚠ " + warn, body_w):
+                buf.append(box_row(st, st.yellow(wl), inner_w))
+    buf.append(box_bottom(st, inner_w))
+    return buf
+
+
+def run_interactive_menu(
+    t3_home: Path, reports: List[ProfileReport], args: argparse.Namespace, st: Style, tr: Translator
+) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("ERROR: interactive UI requires a TTY.", file=sys.stderr)
+        return 1
+
+    h_str = f"{args.min_age:g}"
+    snap = build_menu_snapshot(reports)
+    fmt_pair = lambda items: f"{tr('items_cnt', n=len(items))} · {format_bytes(sum(s.size_bytes for s in items))}"
+
+    def build_menu_items() -> List[Tuple[str, str, str, str, bool]]:
+        n_idx = snap.prunable_orphan_cnt
+        staging_blocked = snap.orphan_summary_cnt > 0 and n_idx == 0
+        if staging_blocked:
+            idx_stat = tr("act_idx_need_staging", n=snap.orphan_summary_cnt)
+        elif n_idx > 0:
+            idx_stat = tr("act_idx_need_quit", n=n_idx) if snap.profiles_busy else tr("rows_cnt", n=n_idx)
+        else:
+            idx_stat = "—"
+        return [
+            ("std", tr("act_std"), tr("act_std_desc", h=h_str), fmt_pair(snap.std_targets) if snap.std_targets else "—", bool(snap.std_targets)),
+            ("deep", tr("act_deep"), tr("act_deep_desc"), fmt_pair(snap.deep_targets) if snap.deep_targets else "—", bool(snap.deep_targets)),
+            ("summaries", tr("act_idx"), tr("act_idx_desc"), idx_stat, n_idx > 0 and not snap.profiles_busy),
+            ("custom", tr("act_custom"), tr("act_custom_desc"), "", True),
+            ("details", tr("act_details"), tr("act_details_desc"), tr("items_cnt", n=len(snap.all_sessions)), True),
+            ("quit", tr("act_quit"), "", "", True),
+        ]
+
+    cursor = next((i for i, item in enumerate(build_menu_items()[:3]) if item[4]), 4)
+    status_notice: Optional[Tuple[str, str]] = None
+    final_action: Optional[Tuple[List[SessionRecord], bool]] = None
+
+    with RawTerminalSession():
+        while True:
+            menu_items = build_menu_items()
+            width = term_width()
+            inner_w = width - 6
+            body_w = inner_w - 4
+
+            buf = _render_home_card(snap, h_str, args.permanent, inner_w, st, tr)
+            buf.append("")
+
+            name_w = max(display_width(item[1]) for item in menu_items)
+            for idx, (key, name, desc, stat_txt, actionable) in enumerate(menu_items):
+                if key == "details":
+                    buf.append("")
+                is_cur = idx == cursor
+                is_cleanup_stat = key in ("std", "deep", "summaries") and actionable
+                name_pad = pad_right(name, name_w)
+                sw = display_width(stat_txt)
+                desc_str = truncate_width(desc, max(8, body_w - name_w - 3 - (sw + 2 if sw else 0))) if desc else ""
+                gap = " " * max(2, body_w - name_w - (3 + display_width(desc_str) if desc_str else 0) - sw)
+
+                if not is_cur and not actionable:
+                    buf.append(f"     {st.dim(name_pad + (f'   {desc_str}' if desc_str else '') + gap + stat_txt)}")
+                    continue
+
+                s_col = (
+                    st.green(stat_txt) if is_cleanup_stat
+                    else (st.subtle(stat_txt) if (is_cur and stat_txt and stat_txt != "—") else st.dim(stat_txt))
+                )
+                if is_cur:
+                    ptr = st.accent("❯ ") if not actionable else st.accent_bold("❯ ")
+                    n_col = st.accent(name_pad) if not actionable else st.accent_bold(name_pad)
+                    d_col = f"   {(st.dim if not actionable else st.subtle)(desc_str)}" if desc_str else ""
+                    buf.append(f"   {ptr}{n_col}{d_col}{gap}{s_col}")
+                else:
+                    n_col = st.subtle(name_pad) if key == "quit" else st.soft(name_pad)
+                    d_col = f"   {st.dim(desc_str)}" if desc_str else ""
+                    buf.append(f"     {n_col}{d_col}{gap}{s_col}")
+
+            buf.append("")
+            if status_notice:
+                n_kind, n_msg = status_notice
+                buf.append(f"     {(st.green('✓ ' + n_msg) if n_kind == 'info' else st.yellow('⚠ ' + n_msg))}")
+            buf.extend(format_footer_lines(
+                st,
+                [("↑↓", tr("k_move")), ("Enter", tr("k_confirm")), ("r", tr("k_refresh")), ("l", tr("k_lang")), ("Esc", tr("k_quit"))],
+                width, margin="     ",
+            ))
+            paint_screen(buf)
+
+            k = read_key()
+            if k == "resize":
+                continue
+            status_notice = None
+            if k in ("esc", "q", "ctrl_c"):
+                break
+            if k == "l":
+                tr.toggle_and_save()
+                continue
+            if k == "r":
+                try:
+                    _, reports = build_plan(
+                        t3_home, include_superseded=args.include_superseded,
+                        include_unknown=args.include_unknown, min_age_hours=args.min_age, skip_lsof=args.skip_lsof,
+                    )
+                    snap = build_menu_snapshot(reports)
+                    status_notice = ("info", tr("notice_refreshed"))
+                except Exception as exc:
+                    status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
+                continue
+            if k in ("up", "k"):
+                cursor = (cursor - 1) % len(menu_items)
+                continue
+            if k in ("down", "j"):
+                cursor = (cursor + 1) % len(menu_items)
+                continue
+            if k != "enter":
+                continue
+
+            action_key = menu_items[cursor][0]
+            if action_key == "quit":
+                break
+            if action_key == "details":
+                tui_view_all_sessions(reports, st, tr)
+                continue
+
+            chosen: List[SessionRecord] = []
+            do_prune_summaries = False
+            if action_key == "std":
+                if not snap.std_targets:
+                    status_notice = ("warn", tr("notice_no_std"))
+                    continue
+                chosen, do_prune_summaries = list(snap.std_targets), args.prune_summaries
+            elif action_key == "deep":
+                if not snap.deep_targets:
+                    status_notice = ("warn", tr("notice_no_deep"))
+                    continue
+                chosen, do_prune_summaries = list(snap.deep_targets), args.prune_summaries
+            elif action_key == "summaries":
+                if snap.orphan_summary_cnt == 0:
+                    status_notice = ("warn", tr("notice_idx_clean"))
+                    continue
+                if snap.prunable_orphan_cnt == 0:
+                    status_notice = ("warn", tr("notice_idx_staging"))
+                    continue
+                if snap.profiles_busy:
+                    status_notice = ("warn", tr("notice_idx_busy"))
+                    continue
+                do_prune_summaries = True
+            elif action_key == "custom":
+                res = tui_per_session_selector(reports, args, st, tr)
+                if res is None:
+                    continue
+                chosen, do_prune_summaries = res
+                if not chosen and not do_prune_summaries:
+                    status_notice = ("warn", tr("notice_none_sel"))
+                    continue
+
+            est_orphans = estimate_pruned_summaries(reports, chosen)
+            # R09: -y applies ONLY to CLI --apply mode, never bypasses TUI confirmation.
+            if tui_confirm_cleanup(
+                chosen, prune_summaries=do_prune_summaries, orphan_summary_count=est_orphans,
+                permanent=args.permanent, st=st, tr=tr,
+            ):
+                final_action = (chosen, do_prune_summaries)
+                break
+            status_notice = ("warn", tr("notice_cancelled"))
+
+    if final_action is None:
+        print(tr("exit_clean"))
+        return 0
+
+    chosen, do_prune_summaries = final_action
+    if args.permanent:
+        confirm_res = confirm_execution(
+            chosen, prune_summaries=do_prune_summaries,
+            orphan_summary_count=estimate_pruned_summaries(reports, chosen),
+            permanent=True, assume_yes=False, st=st, tr=tr,
+        )
+        if confirm_res != "yes":
+            if confirm_res == "no":
+                print(tr("cancelled"))
+                return 0
+            return 1
+
+    return execute_cleanup(
+        t3_home, reports, chosen, prune_summaries=do_prune_summaries,
+        permanent=args.permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
+    )
+
+
+# ------------------------- Confirmation & Execution -------------------------
+
+
+def confirm_execution(
+    chosen: List[SessionRecord], *, prune_summaries: bool, orphan_summary_count: int,
+    permanent: bool, assume_yes: bool, st: Style, tr: Translator
+) -> str:
+    """Returns 'yes', 'no', or 'nontty'."""
+    if assume_yes:
+        return "yes"
+    if not sys.stdin.isatty():
+        print(tr("confirm_nontty"), file=sys.stderr)
+        return "nontty"
+
+    print("\n" + st.border("  " + "─" * min(72, term_width() - 4)))
+    if chosen:
+        total_bytes = sum(s.size_bytes for s in chosen)
+        print("  " + tr("v_confirm_body", n=st.hi(str(len(chosen))), sz=st.green(format_bytes(total_bytes))))
+        for s in chosen:
+            print(f"    • {st.dim(s.uuid[:8])}  {pad_left(format_bytes(s.size_bytes), 9)}  {truncate_width(session_title(s, tr), 42)}  {st.dim('[' + s.category + ']')}")
+    if prune_summaries:
+        print("  " + tr("v_confirm_idx", n=orphan_summary_count))
+
+    try:
+        if permanent:
+            return "yes" if input(st.bold_red(tr("confirm_perm_prompt"))).strip() == "DELETE" else "no"
+        return "yes" if input(st.accent_bold(tr("confirm_trash_prompt"))).strip().lower() in ("y", "yes") else "no"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "no"
+
+
+def execute_cleanup(
+    t3_home: Path, reports: List[ProfileReport], chosen: List[SessionRecord], *,
+    prune_summaries: bool, permanent: bool, skip_lsof: bool, st: Style, tr: Translator,
+    min_age_hours: float = 24.0,
+) -> int:
+    try:
+        approved, blocked = reverify_before_execute(
+            t3_home, tr, chosen, skip_lsof=skip_lsof, min_age_hours=min_age_hours
+        )
+    except ContractError as exc:
+        print(f"{st.bold_red('ERROR (fail-closed): ')}{exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"{st.bold_red('ERROR: ')}{exc}", file=sys.stderr)
+        return 1
+
+    for s, reason in blocked:
+        print(f"  {st.yellow('⚠')} " + tr("reverify_blocked", uid=s.uuid[:8], title=session_title(s, tr), reason=reason))
+
+    exit_code, cleaned_count, cleaned_bytes = 0, 0, 0
+    any_file_error = False
+    cleaned_uuids_by_acp: Dict[Path, Set[str]] = {}
+
+    if approved:
+        if permanent:
+            for s in approved:
+                try:
+                    remove_permanently(s.paths)
+                    cleaned_count += 1
+                    cleaned_bytes += s.size_bytes
+                    cleaned_uuids_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
+                except Exception as exc:
+                    print(f"  {st.bold_red('[ERROR]')} {s.uuid}: {exc}", file=sys.stderr)
+                    exit_code = 1
+                    any_file_error = True
+        else:
+            by_profile: Dict[Path, List[SessionRecord]] = {}
+            for s in approved:
+                by_profile.setdefault(s.acp_dir, []).append(s)
+            ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            multi_profile = len(by_profile) > 1
+            for acp_dir, prof_sessions in by_profile.items():
+                prof_tag = acp_dir.parent.name[:12]
+                try:
+                    bname = trash_profile_bundle(acp_dir, prof_sessions, tr, ts=ts, multi_profile=multi_profile)
+                    cleaned_count += len(prof_sessions)
+                    cleaned_bytes += sum(s.size_bytes for s in prof_sessions)
+                    cleaned_uuids_by_acp.setdefault(acp_dir, set()).update(s.uuid for s in prof_sessions)
+                    print(f"  {st.green('✓')} " + tr("trashed_bundle", name=st.hi(bname)))
+                except UncertainTrashError as exc:
+                    print(
+                        f"  {st.bold_red('[ERROR]')} "
+                        + tr("trash_uncertain", p=prof_tag, name=exc.bundle_name, err=exc.reason),
+                        file=sys.stderr,
+                    )
+                    if exc.bundle_dir is not None:
+                        print(f"    {st.subtle(str(exc.bundle_dir))}", file=sys.stderr)
+                    exit_code = 1
+                    any_file_error = True
+                except PartialRollbackError as exc:
+                    unrolled = ", ".join(p.name for p in exc.failed_paths)
+                    print(
+                        f"  {st.bold_red('[ERROR]')} "
+                        + tr("trash_partial_rollback", p=prof_tag, path=str(exc.bundle_dir), files=unrolled),
+                        file=sys.stderr,
+                    )
+                    exit_code = 1
+                    any_file_error = True
+                except Exception as exc:
+                    print(
+                        f"  {st.bold_red('[ERROR]')} "
+                        + tr("trash_profile_failed", p=prof_tag, err=str(exc)),
+                        file=sys.stderr,
+                    )
+                    exit_code = 1
+                    any_file_error = True
+
+    if prune_summaries:
+        if any_file_error:
+            print(f"  {st.yellow('⚠')} " + tr("skip_idx_after_err"))
+        else:
+            fresh_state: Optional[T3State] = None
+            state_db_path: Optional[Path] = None
+            try:
+                state_db_path = verify_t3_contract(t3_home / "userdata")
+                fresh_state = load_t3_state(state_db_path)
+            except ContractError as exc:
+                print(f"{st.bold_red('ERROR (fail-closed): ')}{exc}", file=sys.stderr)
+                exit_code = 2
+            except Exception as exc:
+                print(f"{st.bold_red('ERROR: ')}{exc}", file=sys.stderr)
+                exit_code = 1
+
+            if fresh_state is not None and state_db_path is not None:
+                t3_db_open, t3_lsof_err = (False, None) if skip_lsof else inspect_file_open(state_db_path)
+                multi_profile = len(reports) > 1
+                for rep in reports:
+                    if not rep.summaries_db_exists:
+                        continue
+                    _, summaries = read_summary_index(rep.acp_dir)
+                    if not summaries:
+                        continue
+                    disk_after = scan_disk_sessions(rep.acp_dir)
+                    sub_graph = collect_subagent_graph(rep.acp_dir, summaries)
+                    active_now = expand_descendants(fresh_state.active_uuids, sub_graph, "@note_subagent")
+                    deleted_now, _ = expand_deleted_descendants(
+                        fresh_state.deleted_uuids, fresh_state.deleted_timestamps, sub_graph, "@note_del_subagent"
+                    )
+                    for u in active_now:
+                        deleted_now.pop(u, None)
+                    safe_ids = find_prunable_summary_ids(
+                        summaries,
+                        active_ids=set(active_now),
+                        disk_ids=set(disk_after),
+                        deleted_ids=set(deleted_now),
+                        superseded_ids=set(fresh_state.superseded_uuids),
+                        cleaned_this_run=cleaned_uuids_by_acp.get(rep.acp_dir, set()),
+                    )
+                    if not safe_ids:
+                        continue
+
+                    live_staging = scan_staging_leftovers(rep.acp_dir)
+                    if live_staging:
+                        print(
+                            f"  {st.yellow('⚠')} "
+                            + tr("skip_idx_staging", p=rep.profile_name[:12], path=str(rep.acp_dir.parent / ".t3-clean-staging"))
+                        )
+                        continue
+
+                    _, summaries_open, lsof_err = (set(), False, None) if skip_lsof else inspect_open_handles(rep.acp_dir)
+                    if t3_db_open or t3_lsof_err or lsof_err or summaries_open or is_profile_in_use_by_process(rep.acp_dir.parent):
+                        print(f"  {st.yellow('⚠')} " + tr("skip_idx_busy", p=rep.profile_name[:12]))
+                    else:
+                        try:
+                            removed_rows, backup_name, vacuum_err = prune_summaries_db(
+                                rep.acp_dir, safe_ids, multi_profile=multi_profile
+                            )
+                            if vacuum_err:
+                                print(f"  {st.green('✓')} " + tr("pruned_rows_novac", n=removed_rows))
+                                print(f"  {st.yellow('⚠')} " + tr("vacuum_warn", err=vacuum_err))
+                            else:
+                                print(f"  {st.green('✓')} " + tr("pruned_rows", n=removed_rows))
+                            if backup_name:
+                                print(f"    {st.subtle(tr('backup_saved', name=st.hi(backup_name)))}")
+                        except ContractError as exc:
+                            print(f"  {st.yellow('⚠ ' + str(exc))}")
+                        except SummariesPruneError as exc:
+                            print(f"  {st.bold_red('[ERROR]')} conversation_summaries.db: {exc.reason}", file=sys.stderr)
+                            if exc.backup_name:
+                                print(f"    {st.subtle(tr('backup_saved', name=st.hi(exc.backup_name)))}")
+                            exit_code = 1
+                        except Exception as exc:
+                            print(f"  {st.bold_red('[ERROR]')} conversation_summaries.db: {exc}", file=sys.stderr)
+                            exit_code = 1
+
+    if chosen or not prune_summaries:
+        done_key = "done_perm" if permanent else "done_trash"
+        print("\n" + tr(done_key, n=st.hi(str(cleaned_count)), sz=st.green(format_bytes(cleaned_bytes))))
+    return exit_code
+
+
+# ------------------------- Entrypoint -------------------------
+
+
+def parse_min_age(raw: str) -> float:
+    try:
+        val = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {raw!r}")
+    if not math.isfinite(val) or val < 0:
+        raise argparse.ArgumentTypeError(f"--min-age must be a finite number >= 0, got {raw!r}")
+    return val
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="t3-clean-agy",
+        description="Safely preview, select, and clean orphaned Antigravity sessions left by T3 Code (macOS).",
+        epilog="Exit codes: 0 = success, 1 = runtime error, 2 = fail-closed schema/safety check refused.",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Open interactive TUI (default in a TTY without --apply / -n).")
+    parser.add_argument("-n", "--dry-run", action="store_true", help="Print a static read-only report without opening the TUI or changing files.")
+    parser.add_argument("--apply", action="store_true", help="Execute cleanup directly from the CLI (prompts unless -y is set).")
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt in --apply CLI mode.")
+    parser.add_argument("--include-superseded", action="store_true", help="In CLI mode, also include superseded segments of live threads.")
+    parser.add_argument("--include-unknown", action="store_true", help="In CLI mode, also include unreferenced UNKNOWN sessions (use with caution).")
+    parser.add_argument("--min-age", type=parse_min_age, default=24.0, metavar="HOURS", help="Cooldown window in hours (default: 24).")
+    parser.add_argument("--prune-summaries", action="store_true", help="Also prune stale rows in conversation_summaries.db (requires T3 closed; backs up to Trash first).")
+    parser.add_argument("--permanent", action="store_true", help="Permanently delete instead of moving a single bundle to macOS Trash.")
+    parser.add_argument("--lang", choices=("zh", "en"), default=None, help="Override display language for this run (zh or en); defaults to saved preference or system locale.")
+    parser.add_argument("--t3-home", type=Path, default=Path.home() / ".t3", help="Override T3 data root directory (default: ~/.t3).")
+    parser.add_argument("--skip-lsof", action="store_true", help="Bypass lsof open-file check.")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show all active protected sessions.")
+    args = parser.parse_args(argv)
+    if args.dry_run and (args.apply or args.interactive):
+        parser.error("--dry-run (-n) cannot be combined with --apply or --interactive (-i).")
+
+    st = make_style(args.no_color)
+    tr = Translator(args.lang or load_saved_lang())
+    t3_home = args.t3_home.expanduser()
+
+    try:
+        _, reports = build_plan(
+            t3_home, include_superseded=args.include_superseded,
+            include_unknown=args.include_unknown, min_age_hours=args.min_age, skip_lsof=args.skip_lsof,
+        )
+    except ContractError as exc:
+        print(f"{st.bold_red('ERROR (fail-closed): ')}{exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"{st.bold_red('ERROR: ')}{exc}", file=sys.stderr)
+        return 1
+
+    if args.interactive or (not args.apply and not args.dry_run and sys.stdin.isatty() and sys.stdout.isatty()):
+        return run_interactive_menu(t3_home, reports, args, st, tr)
+
+    print_report(reports, args, st, tr)
+    if not args.apply:
+        return 0
+
+    for rep in reports:
+        if rep.lsof_error and not args.skip_lsof:
+            print(f"\n{st.bold_red('ERROR: ')}lsof check failed ({rep.lsof_error}); refusing --apply.", file=sys.stderr)
+            return 2
+
+    chosen = [s for rep in reports for s in rep.sessions if s.selected]
+    est_orphans = estimate_pruned_summaries(reports, chosen)
+    if not chosen and not (args.prune_summaries and est_orphans > 0):
+        printed_staging_skip = False
+        if args.prune_summaries:
+            for rep in reports:
+                if rep.staging_leftovers and rep.orphan_summary_ids:
+                    print(
+                        f"\n  {st.yellow('⚠')} "
+                        + tr("skip_idx_staging", p=rep.profile_name[:12], path=str(rep.acp_dir.parent / ".t3-clean-staging"))
+                    )
+                    printed_staging_skip = True
+        if not printed_staging_skip:
+            print("\n" + tr("no_work"))
+        return 0
+
+    confirm_res = confirm_execution(
+        chosen, prune_summaries=args.prune_summaries, orphan_summary_count=est_orphans,
+        permanent=args.permanent, assume_yes=args.yes, st=st, tr=tr,
+    )
+    if confirm_res == "nontty":
+        return 1
+    if confirm_res != "yes":
+        print(tr("cancelled"))
+        return 0
+
+    return execute_cleanup(
+        t3_home, reports, chosen, prune_summaries=args.prune_summaries,
+        permanent=args.permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
