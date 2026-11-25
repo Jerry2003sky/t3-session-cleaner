@@ -318,7 +318,7 @@ class TestT3SessionCleaner(unittest.TestCase):
 
         _, reps = mod.build_plan(t, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
         (t / "userdata" / "statev3.sqlite").write_bytes(b"")
-        rc = mod.execute_cleanup(t, reps, [], prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+        rc = mod.execute_cleanup(t, reps, [], prune_summaries=True, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc, 2)
         (t / "userdata" / "statev3.sqlite").unlink()
 
@@ -684,7 +684,7 @@ class TestT3SessionCleaner(unittest.TestCase):
             {"uuid": u3, "bundle_relpath": f"conversations/{u3}.db", "original_path": str((conv / f"{u3}.db").resolve())},
         ]
         rsh = bundle / "restore.sh"
-        rsh.write_text(mod.build_restore_script(entries))
+        rsh.write_text(mod.build_restore_script(entries, acp.resolve()))
         rsh.chmod(0o755)
         res = subprocess.run(["bash", str(rsh)], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
@@ -704,7 +704,7 @@ class TestT3SessionCleaner(unittest.TestCase):
             {"uuid": u4, "bundle_relpath": f"conversations/{u4}.db-wal", "original_path": str((conv / f"{u4}.db-wal").resolve())},
         ]
         rsh2 = b2 / "restore.sh"
-        rsh2.write_text(mod.build_restore_script(e2))
+        rsh2.write_text(mod.build_restore_script(e2, acp.resolve()))
         rsh2.chmod(0o755)
         res2 = subprocess.run(["bash", str(rsh2)], capture_output=True, text=True)
         self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
@@ -806,21 +806,14 @@ class TestT3SessionCleaner(unittest.TestCase):
         r_mismatch = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
         self.assertNotEqual(r_mismatch.returncode, 0)
 
-        # (6) Target DB missing but leftover -wal exists -> refused
+        # (6) Target DB missing -> refused, never recreated
         for suf in ("", "-wal", "-shm", "-journal"):
             p = Path(str(sdb) + suf)
             if p.exists():
                 p.unlink()
-        Path(str(sdb) + "-wal").write_bytes(b"LEFTOVER_WAL")
-        r_wal = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
-        self.assertNotEqual(r_wal.returncode, 0)
+        r_missing = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r_missing.returncode, 0)
         self.assertFalse(sdb.exists())
-
-        # (7) Target DB missing and NO sidecars -> copies cleanly
-        Path(str(sdb) + "-wal").unlink()
-        r_copy = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
-        self.assertEqual(r_copy.returncode, 0, r_copy.stdout + r_copy.stderr)
-        self.assertTrue(sdb.is_file())
 
     def test_r07_statev2_lsof_blocks_index_prune_even_without_agy(self):
         t = self.root / "t_r07"
@@ -893,32 +886,22 @@ class TestT3SessionCleaner(unittest.TestCase):
         acps, del_ids = make_fixture(t, del_sizes=(4096,))
         target = acps[0] / "conversations" / f"{del_ids[0]}.db"
 
-        # TUI with --permanent -y must STILL show confirm view AND still require typing DELETE;
-        # empty Enter cancels back to Main Menu without deleting, then typing DELETE executes and returns to refreshed Main Menu.
+        # -y must STILL show the TUI confirm view; cancelling there leaves everything untouched.
         rc, caps = run_pty(
-            [str(SCRIPT), "--t3-home", str(t), "-i", "--permanent", "-y", "--skip-lsof", "--lang", "en"],
+            [str(SCRIPT), "--t3-home", str(t), "-i", "-y", "--skip-lsof", "--lang", "en"],
             self.env,
             cols=92,
             rows=26,
             steps=[
-                (b"\r", "Confirm Permanent Delete"),  # Enter on Standard clean -> Confirm screen
-                (b"y", "DELETE"),                     # Confirm in TUI -> prompt for DELETE
-                (b"\r", "Cancelled."),                # Empty Enter -> cancel back to Main Menu without deleting!
-                (b"\r", "Confirm Permanent Delete"),  # Re-enter Standard clean
-                (b"y", "DELETE"),                     # Confirm in TUI -> prompt for DELETE again
-                (b"DELETE\r", "100% active"),         # Type DELETE -> delete + sync summaries, return to refreshed Main Menu
-                b"q",                                 # Quit TUI cleanly
+                (b"\r", "Confirm Cleanup"),  # Enter on Standard clean -> Confirm screen
+                (b"n", "Cancelled."),
+                b"q",
             ],
         )
         self.assertEqual(rc, 0)
-        self.assertIn("Confirm Permanent Delete", strip_ansi(caps[1]))
-        self.assertIn("DELETE", strip_ansi(caps[2]))
-        self.assertIn("Cancelled.", strip_ansi(caps[3]))
-        self.assertIn("100% active", strip_ansi(caps[6].split("\x1b[H")[-1]))
-        self.assertFalse(target.exists(), "Typing DELETE must permanently remove file")
-        c = sqlite3.connect(acps[0] / "conversation_summaries.db")
-        self.assertEqual(c.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 1)
-        c.close()
+        self.assertIn("Confirm Cleanup", strip_ansi(caps[1]))
+        self.assertIn("Cancelled.", strip_ansi(caps[2]))
+        self.assertTrue(target.exists(), "-y must not bypass TUI confirmation")
 
     def test_r10_staging_manifest_and_restore_written_before_move_and_warning_has_path(self):
         t = self.root / "t_r10"
@@ -981,7 +964,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         crsh = conflict_bundle / "restore.sh"
         crsh.write_text(mod.build_restore_script([
             {"uuid": del_ids[0], "bundle_relpath": f"conversations/{del_ids[0]}.db", "original_path": str(f1.resolve())},
-        ]))
+        ], acps[0].resolve()))
         crsh.chmod(0o755)
         r_skip = subprocess.run(["bash", str(crsh)], capture_output=True, text=True)
         self.assertEqual(r_skip.returncode, 0, r_skip.stdout + r_skip.stderr)
@@ -999,7 +982,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         (t1 / "userdata" / "statev3.sqlite").write_bytes(b"")
         err_buf, out_buf = io.StringIO(), io.StringIO()
         with redirect_stdout(out_buf), redirect_stderr(err_buf):
-            rc1 = mod.execute_cleanup(t1, reps1, chosen1, prune_summaries=False, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+            rc1 = mod.execute_cleanup(t1, reps1, chosen1, prune_summaries=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc1, 2)
         self.assertNotIn("Traceback", err_buf.getvalue())
         self.assertTrue((acps1[0] / "conversations" / f"{del1[0]}.db").exists())
@@ -1025,7 +1008,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         err2, out2 = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"T3_CLEAN_TRASH_BIN": str(stub_drop_v3)}):
             with redirect_stdout(out2), redirect_stderr(err2):
-                rc2 = mod.execute_cleanup(t2, reps2, chosen2, prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+                rc2 = mod.execute_cleanup(t2, reps2, chosen2, prune_summaries=True, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc2, 2)
         self.assertIn("Moved bundle to Trash", out2.getvalue())
         self.assertIn("4.0 KB", out2.getvalue())
@@ -1087,53 +1070,11 @@ class TestT3SessionCleaner(unittest.TestCase):
         )
         self.assertEqual(rc_tty, 0)
 
-    def test_r14_vacuum_and_delete_failures_report_backup_name(self):
-        t = self.root / "t_r14"
+    def test_r14_delete_failure_reports_backup_name(self):
         orphans = ("33333333-3333-3333-3333-000000000001",)
-        acps, _ = make_fixture(t, del_sizes=(), orphan_ids=orphans)
-        _, reps = mod.build_plan(t, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
-
-        # Case 1: VACUUM fails after committed DELETE -> warning with deleted count + backup name + error
         real_connect = sqlite3.connect
 
-        class VacuumFailConn:
-            def __init__(self, inner):
-                self._inner = inner
-
-            def cursor(self):
-                inner_cur = self._inner.cursor()
-
-                class Cur:
-                    def __getattr__(self, k):
-                        return getattr(inner_cur, k)
-
-                    def execute(self, sql, *a, **kw):
-                        if sql.strip().upper() == "VACUUM":
-                            raise sqlite3.OperationalError("database or disk is full")
-                        return inner_cur.execute(sql, *a, **kw)
-
-                return Cur()
-
-            def __getattr__(self, k):
-                return getattr(self._inner, k)
-
-        def connect_vac_fail(path, *a, **kw):
-            c = real_connect(path, *a, **kw)
-            if not kw.get("uri") and str(path).endswith("conversation_summaries.db") and ".t3-clean-staging" not in str(path):
-                return VacuumFailConn(c)
-            return c
-
-        out1, err1 = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"T3_CLEAN_TRASH_BIN": str(self.trash_stub)}):
-            with mock.patch("sqlite3.connect", side_effect=connect_vac_fail):
-                with redirect_stdout(out1), redirect_stderr(err1):
-                    rc1 = mod.execute_cleanup(t, reps, [], prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
-        self.assertEqual(rc1, 0)
-        self.assertIn("1", out1.getvalue())
-        self.assertIn("t3-session-cleaner-summaries-backup-", out1.getvalue())
-        self.assertIn("disk is full", out1.getvalue())
-
-        # Case 2: DELETE fails after backup -> still reports backup name and returns 1
+        # DELETE fails after backup -> still reports backup name and returns 1
         t2 = self.root / "t_r14b"
         make_fixture(t2, del_sizes=(), orphan_ids=orphans)
         _, reps2 = mod.build_plan(t2, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
@@ -1169,7 +1110,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         with mock.patch.dict(os.environ, {"T3_CLEAN_TRASH_BIN": str(self.trash_stub)}):
             with mock.patch("sqlite3.connect", side_effect=connect_del_fail):
                 with redirect_stdout(out2), redirect_stderr(err2):
-                    rc2 = mod.execute_cleanup(t2, reps2, [], prune_summaries=True, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+                    rc2 = mod.execute_cleanup(t2, reps2, [], prune_summaries=True, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc2, 1)
         self.assertIn("t3-session-cleaner-summaries-backup-", out2.getvalue() + err2.getvalue())
 
@@ -1198,7 +1139,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         dst = blocker / "conversations" / f"{u}.db"
 
         rsh = bundle / "restore.sh"
-        rsh.write_text(mod.build_restore_script([{"uuid": u, "bundle_relpath": f"conversations/{u}.db", "original_path": str(dst)}]))
+        rsh.write_text(mod.build_restore_script([{"uuid": u, "bundle_relpath": f"conversations/{u}.db", "original_path": str(dst)}], blocker))
         rsh.chmod(0o755)
         res = subprocess.run(["bash", str(rsh)], capture_output=True, text=True)
         self.assertNotEqual(res.returncode, 0)
@@ -1467,7 +1408,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         with mock.patch.dict(os.environ, {"T3_CLEAN_TRASH_BIN": str(self.trash_stub)}):
             with mock.patch.object(Path, "write_text", fail_manifest):
                 with redirect_stdout(out), redirect_stderr(err):
-                    rc = mod.execute_cleanup(t, reps, chosen, prune_summaries=False, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+                    rc = mod.execute_cleanup(t, reps, chosen, prune_summaries=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc, 1)
         self.assertTrue(target.exists())
         self.assertFalse((acp.parent / ".t3-clean-staging").exists(), "Empty staging dir must be removed on pre-move failure")
@@ -1551,7 +1492,7 @@ class TestT3SessionCleaner(unittest.TestCase):
         with mock.patch.object(mod, "inspect_file_open", return_value=(False, "simulated statev2 lsof error")):
             with mock.patch.object(mod, "inspect_open_handles", return_value=(set(), False, None)):
                 with redirect_stdout(out7), redirect_stderr(err7):
-                    mod.execute_cleanup(t_r07, reps7, [], prune_summaries=True, permanent=False, skip_lsof=False, st=mod.Style(False), tr=mod.Translator("en"))
+                    mod.execute_cleanup(t_r07, reps7, [], prune_summaries=True, skip_lsof=False, st=mod.Style(False), tr=mod.Translator("en"))
         c7 = sqlite3.connect(acps7[0] / "conversation_summaries.db")
         self.assertEqual(c7.execute("SELECT COUNT(*) FROM conversation_summaries").fetchone()[0], 2)
         c7.close()
@@ -1566,34 +1507,10 @@ class TestT3SessionCleaner(unittest.TestCase):
         out11, err11 = io.StringIO(), io.StringIO()
         with mock.patch.object(mod, "reverify_before_execute", side_effect=RuntimeError("boom")):
             with redirect_stdout(out11), redirect_stderr(err11):
-                rc11 = mod.execute_cleanup(t_r07, reps7, [], prune_summaries=False, permanent=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+                rc11 = mod.execute_cleanup(t_r07, reps7, [], prune_summaries=False, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
         self.assertEqual(rc11, 1)
         self.assertNotIn("Traceback", err11.getvalue())
         self.assertIn("boom", err11.getvalue())
-
-        # 8. R12: --permanent partial failure skips index pruning
-        t_r12p = self.root / "t_r22_r12p"
-        acps12, _ = make_fixture(t_r12p, del_sizes=(4096, 2048), orphan_ids=orphans)
-        _, reps12 = mod.build_plan(t_r12p, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
-        chosen12 = [s for s in reps12[0].sessions if s.selected]
-        real_rm = mod.remove_permanently
-        calls12 = {"n": 0}
-
-        def fail_second_rm(paths):
-            calls12["n"] += 1
-            if calls12["n"] == 2:
-                raise OSError("permission denied")
-            return real_rm(paths)
-
-        out12, err12 = io.StringIO(), io.StringIO()
-        with mock.patch.object(mod, "remove_permanently", side_effect=fail_second_rm):
-            with redirect_stdout(out12), redirect_stderr(err12):
-                rc12 = mod.execute_cleanup(t_r12p, reps12, chosen12, prune_summaries=True, permanent=True, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
-        self.assertEqual(rc12, 1)
-        c12 = sqlite3.connect(acps12[0] / "conversation_summaries.db")
-        ids12 = {row[0] for row in c12.execute("SELECT conversation_id FROM conversation_summaries").fetchall()}
-        c12.close()
-        self.assertIn(orphans[0], ids12)
 
     def test_r24_staging_ignores_ds_store_only(self):
         t = self.root / "t_r24"
@@ -1918,6 +1835,61 @@ class TestT3SessionCleaner(unittest.TestCase):
         by_id2 = {s.uuid: s for s in reps2[0].sessions}
         self.assertEqual(by_id2[u_sup_xfer].category, "ACTIVE")
         self.assertEqual(mod.session_note(by_id2[u_sup_xfer], tr_zh), "上下文待传")
+
+    def test_ctrl_c_exits_without_traceback(self):
+        t = self.root / "t_ctrl_c"
+        make_fixture(t)
+
+        def ctrl_c(proc, _master):
+            proc.send_signal(signal.SIGINT)
+
+        rc, caps = run_pty(
+            [str(SCRIPT), "--t3-home", str(t), "-i", "--skip-lsof", "--lang", "en"],
+            self.env,
+            cols=92,
+            rows=26,
+            steps=[
+                (b"\x1b[B\x1b[B\x1b[B\x1b[B\r", "All Local Sessions"),
+                ctrl_c,  # Sub-page: back to Main Menu
+                ctrl_c,  # Main Menu: quit
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("All Local Sessions", strip_ansi(caps[1]))
+        self.assertIn("Standard clean", strip_ansi(caps[2].split("\x1b[H")[-1]))
+        self.assertIn("Exited without changing any files.", strip_ansi("".join(caps)))
+        self.assertNotIn("Traceback", "".join(caps))
+
+        # Interrupted while scanning (outside the TUI key loop).
+        started = self.root / "lsof_started"
+        slow_lsof = self.root / "slow_bin" / "lsof"
+        slow_lsof.parent.mkdir()
+        slow_lsof.write_text(f"#!/bin/sh\n: > {str(started)!r}\nexec sleep 30\n")
+        slow_lsof.chmod(0o755)
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "--t3-home", str(t), "-n"],
+            env={**self.env, "PATH": f"{slow_lsof.parent}:{self.env['PATH']}"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 10
+        while not started.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGINT)
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 130)
+        self.assertNotIn("Traceback", err)
+
+    def test_cli_report_colon_matches_language(self):
+        t = self.root / "t_colon"
+        make_fixture(t)
+        for lang, label in (("en", "Storage: "), ("zh", "空间变化：")):
+            res = subprocess.run(
+                [str(SCRIPT), "--t3-home", str(t), "-n", "--skip-lsof", "--lang", lang],
+                env=self.env, capture_output=True, text=True,
+            )
+            self.assertIn(label, res.stdout)
+            if lang == "en":
+                self.assertNotIn("：", res.stdout)
 
 
 if __name__ == "__main__":

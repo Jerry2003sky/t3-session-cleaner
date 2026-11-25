@@ -80,10 +80,8 @@ TERMINAL_OUTBOX_STATUSES = {"succeeded", "cancelled"}
 MESSAGES: Dict[str, Dict[str, str]] = {
     "zh": {
         "app_sub": "Antigravity 残留清理",
-        "app_sub_short": "残留清理",
         "mode_trash": "移入废纸篓 · 可还原",
         "mode_trash_short": "废纸篓 · 可还原",
-        "mode_perm": "永久删除模式",
         "untitled": "(无标题)",
         "sessions_cnt": "{n} 个会话",
         "items_cnt": "{n} 项",
@@ -92,7 +90,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "legend_clean": "可清",
         "legend_other": "其它",
         "status_all_clean": "✓ 无残留文件 · 100% 活跃",
-        "status_all_clean_short": "✓ 无残留",
         "status_empty": "暂无本地会话",
         "bar_reclaimable": "可清理 {pct}",
         "bar_inactive": "非活跃 {pct}",
@@ -159,9 +156,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_details_title": "全部本地会话",
         "v_details_empty": "当前没有任何 Antigravity 本地会话",
         "v_confirm_title": "确认执行清理",
-        "v_confirm_title_perm": "确认永久删除",
         "v_confirm_sub_trash": "打包移入废纸篓 · 自带 restore.sh",
-        "v_confirm_sub_perm": "不可恢复 · 下一步需输入 DELETE",
         "v_confirm_body": "即将清理 {n} 个会话，预计释放 {sz}",
         "v_confirm_idx": "同步清理 summaries.db 约 {n} 条失效索引（先备份至废纸篓）",
         "v_confirm_idx_matched": "同步清理对应的 {n} 条 summaries.db 索引（先备份至废纸篓）",
@@ -169,15 +164,12 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_confirm_idx_busy": "T3 运行中，暂不清理对应的 {n} 条索引（退出 T3 后可清理）",
         "v_confirm_idx_staging": "存在暂存残留，暂不清理对应的 summaries.db 索引",
         "v_confirm_ok": "确认清理并打包移入废纸篓",
-        "v_confirm_ok_perm": "确认永久删除（下一步需输入 DELETE）",
         "v_confirm_cancel": "取消，返回主菜单",
         "v_result_title_warn": "清理完成（含提示）",
         "v_result_title_err": "清理出现异常",
         "k_back_home": "返回主菜单",
         "notice_done_trash": "已移入废纸篓 {n} 个会话，释放 {sz}。",
-        "notice_done_perm": "已永久删除 {n} 个会话，释放 {sz}。",
         "notice_done_trash_idx": "已移入废纸篓 {n} 个会话 ({sz})，并同步清理 {r} 条索引。",
-        "notice_done_perm_idx": "已永久删除 {n} 个会话 ({sz})，并同步清理 {r} 条索引。",
         "notice_done_idx": "已清理 {r} 条失效索引（原库已备份至废纸篓）。",
         "notice_done_warn": "清理已完成，存在提示或跳过项（已刷新状态）。",
         "notice_done_err": "清理过程中出现错误（已刷新状态）。",
@@ -193,7 +185,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "b_unknown": "未关联",
         "b_locked": "占用",
         "b_trash": "移废纸篓",
-        "b_perm": "永久删除",
         "b_skip": "已跳过",
         "note_active": "活跃对话",
         "note_archived": "已归档",
@@ -210,8 +201,8 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "note_deleted_on": "{d} 已删",
         "cli_preview": "预览模式 · 只读",
         "cli_apply_trash": "执行清理 · 废纸篓",
-        "cli_apply_perm": "执行清理 · 永久删除",
         "cli_meta": "冷静期 {h}h · 旧版={s} · 未关联={u}",
+        "colon": "：",
         "on": "开",
         "off": "关",
         "sec_clean": "待清理",
@@ -226,14 +217,11 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "cli_idx_clean": "失效索引：已干净（0 条记录）",
         "exit_clean": "已退出，未改动任何文件。",
         "done_trash": "完成：打包移入废纸篓 {n} 个会话，释放 {sz}。",
-        "done_perm": "完成：永久删除 {n} 个会话，释放 {sz}。",
         "trashed_bundle": "已打包移入废纸篓：{name}（内含 manifest.json 与 restore.sh）",
         "trash_partial_rollback": "Profile {p} 移入废纸篓失败且部分文件未能回滚，原件保留在暂存目录：{path}（未回滚：{files}）",
         "trash_uncertain": "Profile {p} 移入废纸篓返回错误，且文件已不在原位与暂存目录，请检查废纸篓中的 {name}：{err}",
         "trash_profile_failed": "Profile {p} 移入废纸篓失败（该 Profile 已回滚）：{err}",
-        "pruned_rows": "已移除 conversation_summaries.db 中 {n} 条失效记录并完成 VACUUM。",
-        "pruned_rows_novac": "已移除 conversation_summaries.db 中 {n} 条失效记录（已提交）。",
-        "vacuum_warn": "VACUUM 失败（不影响已提交的清理）：{err}",
+        "pruned_rows": "已移除 conversation_summaries.db 中 {n} 条失效记录。",
         "backup_saved": "改库前原件已备份至废纸篓：{name}（内含 restore.sh）",
         "skip_idx_busy": "已跳过索引清理：Profile {p} 正被运行中的 T3/agy 使用，请先退出 T3 Code。",
         "skip_idx_staging": "已跳过索引清理：Profile {p} 存在残留暂存目录 {path}，请先处理。",
@@ -248,16 +236,13 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "no_profiles": "未在 ~/.t3/userdata/providers/antigravity/ 下发现任何 Antigravity 数据目录。",
         "no_work": "没有可执行的清理项。",
         "confirm_nontty": "ERROR: 非交互终端下执行 --apply 必须显式传入 -y / --yes。",
-        "confirm_perm_prompt": "  ⚠ 永久删除无法恢复！请输入 DELETE 确认，直接回车取消：",
         "confirm_trash_prompt": "  确认打包移入 macOS 废纸篓？[y/N]：",
         "cancelled": "已取消，未改动任何文件。",
     },
     "en": {
         "app_sub": "Antigravity Cleanup",
-        "app_sub_short": "Cleanup",
         "mode_trash": "Trash bundle · Restorable",
         "mode_trash_short": "Trash · Restorable",
-        "mode_perm": "Permanent delete",
         "untitled": "(untitled)",
         "sessions_cnt": "{n} sessions",
         "items_cnt": "{n}",
@@ -266,7 +251,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "legend_clean": "Cleanable",
         "legend_other": "Other",
         "status_all_clean": "✓ Clean · 100% active",
-        "status_all_clean_short": "✓ Clean",
         "status_empty": "No local sessions",
         "bar_reclaimable": "{pct} cleanable",
         "bar_inactive": "{pct} inactive",
@@ -333,9 +317,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_details_title": "All Local Sessions",
         "v_details_empty": "No Antigravity sessions found on disk.",
         "v_confirm_title": "Confirm Cleanup",
-        "v_confirm_title_perm": "Confirm Permanent Delete",
         "v_confirm_sub_trash": "Single Trash bundle · restore.sh included",
-        "v_confirm_sub_perm": "Irreversible · Next step requires typing DELETE",
         "v_confirm_body": "Ready to clean {n} session(s), freeing {sz}",
         "v_confirm_idx": "Prune ~{n} stale index entries in summaries.db (backed up)",
         "v_confirm_idx_matched": "Also remove {n} matching summaries.db entry(ies) (backed up)",
@@ -343,15 +325,12 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "v_confirm_idx_busy": "T3 running: {n} matching index row(s) kept (quit T3 to prune)",
         "v_confirm_idx_staging": "Staging leftover: matching summaries.db rows kept",
         "v_confirm_ok": "Move bundled folder to Trash",
-        "v_confirm_ok_perm": "Delete permanently (type DELETE next)",
         "v_confirm_cancel": "Cancel and go back",
         "v_result_title_warn": "Cleanup Completed with Notices",
         "v_result_title_err": "Cleanup Failed",
         "k_back_home": "Back to menu",
         "notice_done_trash": "Moved {n} session(s) to Trash, freed {sz}.",
-        "notice_done_perm": "Permanently deleted {n} session(s), freed {sz}.",
         "notice_done_trash_idx": "Moved {n} session(s) ({sz}) · removed {r} index.",
-        "notice_done_perm_idx": "Deleted {n} session(s) ({sz}) · removed {r} index.",
         "notice_done_idx": "Pruned {r} stale index entry(ies) (backup in Trash).",
         "notice_done_warn": "Cleanup finished with notices (refreshed).",
         "notice_done_err": "Cleanup encountered error(s) (refreshed).",
@@ -367,7 +346,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "b_unknown": "Unlinked",
         "b_locked": "Locked",
         "b_trash": "Trash",
-        "b_perm": "Delete",
         "b_skip": "Skip",
         "note_active": "Active thread",
         "note_archived": "Archived",
@@ -384,8 +362,8 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "note_deleted_on": "Del {d}",
         "cli_preview": "Dry-run · Read-only",
         "cli_apply_trash": "Apply · Trash",
-        "cli_apply_perm": "Apply · Permanent",
         "cli_meta": "cooldown {h}h · superseded={s} · unlinked={u}",
+        "colon": ": ",
         "on": "on",
         "off": "off",
         "sec_clean": "To clean",
@@ -400,14 +378,11 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "cli_idx_clean": "Stale index: clean (0 entries)",
         "exit_clean": "Exited without changing any files.",
         "done_trash": "Done: moved {n} session(s) to Trash, freed {sz}.",
-        "done_perm": "Done: permanently deleted {n} session(s), freed {sz}.",
         "trashed_bundle": "Moved bundle to Trash: {name} (includes manifest.json & restore.sh)",
         "trash_partial_rollback": "Profile {p} trash failed with incomplete rollback; originals kept at: {path} (unrolled: {files})",
         "trash_uncertain": "Profile {p} trash returned an error and file(s) are no longer at source or staging; check macOS Trash for {name}: {err}",
         "trash_profile_failed": "Profile {p} trash failed (this profile rolled back): {err}",
-        "pruned_rows": "Removed {n} stale entry(ies) from conversation_summaries.db and ran VACUUM.",
-        "pruned_rows_novac": "Removed {n} stale entry(ies) from conversation_summaries.db (committed).",
-        "vacuum_warn": "VACUUM failed (committed deletions are intact): {err}",
+        "pruned_rows": "Removed {n} stale entry(ies) from conversation_summaries.db.",
         "backup_saved": "Pre-prune DB backup moved to Trash: {name} (includes restore.sh)",
         "skip_idx_busy": "Skipped index prune: profile {p} is in use by T3/agy. Quit T3 Code first.",
         "skip_idx_staging": "Skipped index prune: profile {p} has leftover staging dir {path}.",
@@ -422,7 +397,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "no_profiles": "No Antigravity profiles found under ~/.t3/userdata/providers/antigravity/.",
         "no_work": "Nothing to clean.",
         "confirm_nontty": "ERROR: non-interactive --apply requires -y / --yes.",
-        "confirm_perm_prompt": "  ⚠ Permanent delete cannot be undone! Type DELETE to confirm: ",
         "confirm_trash_prompt": "  Move bundled folder to macOS Trash? [y/N]: ",
         "cancelled": "Cancelled. No files changed.",
     },
@@ -453,26 +427,15 @@ def load_saved_lang() -> str:
     return detect_default_lang()
 
 
-def save_lang(lang: str) -> bool:
-    if lang not in MESSAGES:
-        return False
+def save_lang(lang: str) -> None:
     cfg = config_file_path()
     try:
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        existing: dict = {}
-        try:
-            loaded = json.loads(cfg.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except (OSError, json.JSONDecodeError):
-            pass
-        existing["lang"] = lang
         tmp = cfg.with_suffix(".tmp")
-        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps({"lang": lang}) + "\n", encoding="utf-8")
         os.replace(tmp, cfg)
-        return True
     except OSError:
-        return False
+        pass
 
 
 class Translator:
@@ -483,10 +446,10 @@ class Translator:
         self.lang = lang if lang in MESSAGES else "en"
         self.table = MESSAGES[self.lang]
 
-    def toggle_and_save(self) -> bool:
+    def toggle_and_save(self) -> None:
         next_lang = "en" if self.lang == "zh" else "zh"
         self.set_lang(next_lang)
-        return save_lang(next_lang)
+        save_lang(next_lang)
 
     def __call__(self, key: str, **kwargs: object) -> str:
         tmpl = self.table[key]
@@ -511,12 +474,11 @@ class UncertainTrashError(RuntimeError):
     """Raised when trash exits non-zero and moved files are missing from both source and staging."""
 
     def __init__(
-        self, reason: str, bundle_name: str, missing_paths: List[Path], bundle_dir: Optional[Path] = None
+        self, reason: str, bundle_name: str, bundle_dir: Optional[Path] = None
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.bundle_name = bundle_name
-        self.missing_paths = missing_paths
         self.bundle_dir = bundle_dir
 
 
@@ -533,7 +495,6 @@ class SummariesPruneError(RuntimeError):
 class SummaryRow:
     title: str
     step_count: Optional[int]
-    last_modified_time: str
     parent_id: str
     has_title_col: bool
     has_step_col: bool
@@ -545,8 +506,6 @@ class SummaryRow:
 
 @dataclass
 class T3State:
-    live_threads: Dict[str, Tuple[str, Optional[str]]]
-    deleted_threads: Dict[str, Tuple[str, str]]
     active_uuids: Dict[str, Tuple[str, str]]
     deleted_uuids: Dict[str, Tuple[str, str]]
     deleted_timestamps: Dict[str, Optional[float]]
@@ -610,7 +569,7 @@ class Style:
     """Muted 256-color palette (no harsh reverse-video white blocks)."""
 
     _CODES = {
-        "bold": "1", "soft": "38;5;251", "hi": "1;38;5;255", "dim": "38;5;242",
+        "soft": "38;5;251", "hi": "1;38;5;255", "dim": "38;5;242",
         "border": "38;5;239", "subtle": "38;5;247", "accent": "38;5;111",
         "accent_bold": "1;38;5;117", "green": "38;5;114", "yellow": "38;5;221",
         "cyan": "38;5;116", "bold_cyan": "1;38;5;117", "lavender": "38;5;141",
@@ -984,8 +943,7 @@ def load_t3_state(db_path: Path) -> T3State:
                 tag = "@note_archived" if archived_at else "@note_active"
                 if is_agy:
                     has_live_agy = True
-                if is_uuid(native_id):
-                    mark(active_uuids, native_id, tag, title)
+                mark(active_uuids, native_id, tag, title)
                 for u in extract_uuids((ptid or "") + " " + (pjson or ""), exclude=[tid]):
                     mark(active_uuids, u, tag, title)
             elif tid in deleted_threads and is_agy:
@@ -1050,8 +1008,7 @@ def load_t3_state(db_path: Path) -> T3State:
         conn.close()
 
     env_conv = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
-    if is_uuid(env_conv):
-        mark(active_uuids, env_conv, "@note_cur_env", "")
+    mark(active_uuids, env_conv, "@note_cur_env", "")
 
     for u in active_uuids:
         deleted_uuids.pop(u, None)
@@ -1060,7 +1017,7 @@ def load_t3_state(db_path: Path) -> T3State:
     for u in deleted_uuids:
         superseded_uuids.pop(u, None)
 
-    return T3State(live_threads, deleted_threads, active_uuids, deleted_uuids, deleted_timestamps, superseded_uuids, has_live_agy)
+    return T3State(active_uuids, deleted_uuids, deleted_timestamps, superseded_uuids, has_live_agy)
 
 
 def discover_antigravity_profiles(userdata_dir: Path) -> List[Tuple[str, Path]]:
@@ -1091,10 +1048,9 @@ def read_summary_index(acp_dir: Path) -> Tuple[bool, Dict[str, SummaryRow]]:
             has_step = "step_count" in cols
             t_col = "title" if has_title else "NULL"
             s_col = "step_count" if has_step else "NULL"
-            m_col = "last_modified_time" if "last_modified_time" in cols else "''"
             p_col = "parent_conversation_id" if "parent_conversation_id" in cols else "''"
-            for cid, title, steps, lmt, parent in conn.execute(
-                f"SELECT conversation_id, {t_col}, {s_col}, {m_col}, {p_col} FROM conversation_summaries"
+            for cid, title, steps, parent in conn.execute(
+                f"SELECT conversation_id, {t_col}, {s_col}, {p_col} FROM conversation_summaries"
             ).fetchall():
                 if is_uuid(cid):
                     parsed_steps: Optional[int] = None
@@ -1106,7 +1062,6 @@ def read_summary_index(acp_dir: Path) -> Tuple[bool, Dict[str, SummaryRow]]:
                     out[cid] = SummaryRow(
                         title=str(title or "") if has_title else "",
                         step_count=parsed_steps,
-                        last_modified_time=str(lmt or ""),
                         parent_id=parent if is_uuid(parent) else "",
                         has_title_col=has_title,
                         has_step_col=has_step,
@@ -1362,7 +1317,7 @@ def format_staging_warnings(leftovers: Sequence[Path], tr: Translator) -> List[s
     return warnings
 
 
-def build_restore_script(entries: List[dict]) -> str:
+def build_restore_script(entries: List[dict], acp_resolved: Path) -> str:
     """Generate a UUID-grouped restore.sh implementing R05 conflict rules and R16 strict mkdir/mv."""
     grouped: Dict[str, List[dict]] = {}
     for item in entries:
@@ -1385,21 +1340,8 @@ def build_restore_script(entries: List[dict]) -> str:
 
     for uid, group in grouped.items():
         manifest_dsts = {item["original_path"] for item in group}
-        conv_dir: Optional[Path] = None
-        for item in group:
-            rel = item["bundle_relpath"]
-            orig = Path(item["original_path"])
-            if rel.startswith("conversations/"):
-                conv_dir = orig.parent
-                break
-            if rel.startswith(("brain/", "annotations/")):
-                conv_dir = orig.parent.parent / "conversations"
-        extra_sidecars: List[str] = []
-        if conv_dir is not None:
-            for suf in SQLITE_SIDECAR_SUFFIXES:
-                cand = str(conv_dir / f"{uid}{suf}")
-                if cand not in manifest_dsts:
-                    extra_sidecars.append(cand)
+        candidates = (str(acp_resolved / "conversations" / f"{uid}{suf}") for suf in SQLITE_SIDECAR_SUFFIXES)
+        extra_sidecars = [c for c in candidates if c not in manifest_dsts]
 
         lines.append(f"# Session {uid}")
         lines.append("conflict_reason=''")
@@ -1457,7 +1399,6 @@ def trash_profile_bundle(
     acp_resolved = acp_dir.resolve()
     moved_items: List[Tuple[str, Path, Path]] = []
     manifest_dsts_by_uid: Dict[str, Set[Path]] = {}
-    conv_dir_by_uid: Dict[str, Path] = {}
 
     try:
         planned_moves: List[Tuple[str, Path, Path]] = []
@@ -1477,10 +1418,6 @@ def trash_profile_bundle(
                 planned_moves.append((s.uuid, src, dst))
                 manifest_dsts_by_uid.setdefault(s.uuid, set()).add(orig_resolved)
                 rel_posix = rel.as_posix()
-                if rel_posix.startswith("conversations/"):
-                    conv_dir_by_uid[s.uuid] = orig_resolved.parent
-                elif s.uuid not in conv_dir_by_uid and rel_posix.startswith(("brain/", "annotations/")):
-                    conv_dir_by_uid[s.uuid] = orig_resolved.parent.parent / "conversations"
                 manifest_files.append({
                     "uuid": s.uuid, "bundle_relpath": rel_posix, "original_path": str(orig_resolved),
                 })
@@ -1495,7 +1432,7 @@ def trash_profile_bundle(
         }
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         restore_path = bundle_dir / "restore.sh"
-        restore_path.write_text(build_restore_script(manifest_files), encoding="utf-8")
+        restore_path.write_text(build_restore_script(manifest_files, acp_resolved), encoding="utf-8")
         restore_path.chmod(0o755)
 
         for uid, src, dst in planned_moves:
@@ -1531,11 +1468,10 @@ def trash_profile_bundle(
                 (dst.exists() or dst.is_symlink()) and (src.exists() or src.is_symlink())
                 for src, dst in pairs
             )
-            if not conflict and uid in conv_dir_by_uid:
-                conv_dir = conv_dir_by_uid[uid]
+            if not conflict:
                 known = manifest_dsts_by_uid.get(uid, set())
                 for suf in SQLITE_SIDECAR_SUFFIXES:
-                    cand = conv_dir / f"{uid}{suf}"
+                    cand = acp_resolved / "conversations" / f"{uid}{suf}"
                     if cand not in known and (cand.exists() or cand.is_symlink()):
                         conflict = True
                         break
@@ -1556,7 +1492,7 @@ def trash_profile_bundle(
 
         if missing_paths:
             raise UncertainTrashError(
-                str(exc), bundle_dir.name, missing_paths, bundle_dir if failed_rollback else None
+                str(exc), bundle_dir.name, bundle_dir if failed_rollback else None
             ) from exc
         if failed_rollback:
             # Preserve bundle_dir with manifest.json & restore.sh so originals are never lost (R01, R19).
@@ -1565,14 +1501,6 @@ def trash_profile_bundle(
         raise
     finally:
         cleanup_empty_staging(staging_parent)
-
-
-def remove_permanently(paths: List[Path]) -> None:
-    for p in paths:
-        if p.is_symlink() or p.is_file():
-            p.unlink()
-        elif p.is_dir():
-            shutil.rmtree(p)
 
 
 def verify_summaries_contract(conn: sqlite3.Connection) -> None:
@@ -1613,71 +1541,16 @@ def backup_summaries_to_trash(acp_dir: Path, *, multi_profile: bool = False) -> 
             "# Quit T3 Code completely before running.",
             "set -euo pipefail",
             'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"',
-            'BACKUP="$BUNDLE_DIR/conversation_summaries.db"',
             f"TARGET={shlex.quote(str(sdb.resolve()))}",
-            'if ! command -v lsof >/dev/null 2>&1; then',
-            '  echo "ERROR: lsof not found; refusing to restore conversation_summaries.db." >&2',
-            "  exit 1",
-            "fi",
-            'if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then',
-            '  err_file="$(mktemp)"',
-            '  trap \'rm -f "$err_file"\' EXIT',
-            "  set +e",
-            '  lsof -n -P -- "$TARGET" >/dev/null 2>"$err_file"',
-            "  lsof_rc=$?",
-            "  set -e",
-            '  lsof_err="$(cat "$err_file")"',
-            '  if [ "$lsof_rc" -eq 0 ]; then',
-            '    echo "ERROR: conversation_summaries.db is open by a process. Quit T3 Code first." >&2',
-            "    exit 1",
-            '  elif [ "$lsof_rc" -ne 1 ] || [ -n "$lsof_err" ]; then',
-            '    echo "ERROR: lsof check failed (exit ${lsof_rc}): ${lsof_err}" >&2',
-            "    exit 1",
-            "  fi",
-            '  python3 - "$BACKUP" "$TARGET" <<\'PY\'',
-            "import sqlite3, sys, urllib.parse",
-            "bak_path, dst_path = sys.argv[1], sys.argv[2]",
-            "conn = sqlite3.connect(dst_path, timeout=5.0, isolation_level=None)",
-            "try:",
-            "    dst_cols = [r[1] for r in conn.execute('PRAGMA table_info(conversation_summaries)').fetchall()]",
-            "    bak_uri = 'file:' + urllib.parse.quote(bak_path, safe='/') + '?mode=ro'",
-            "    bak_conn = sqlite3.connect(bak_uri, uri=True)",
-            "    try:",
-            "        bak_cols = [r[1] for r in bak_conn.execute('PRAGMA table_info(conversation_summaries)').fetchall()]",
-            "    finally:",
-            "        bak_conn.close()",
-            "    if not dst_cols or 'conversation_id' not in dst_cols or set(dst_cols) != set(bak_cols):",
-            "        sys.stderr.write('ERROR: schema mismatch between backup and current conversation_summaries.db.\\n')",
-            "        sys.exit(1)",
-            "    qcols = ', '.join('\"' + c.replace('\"', '\"\"') + '\"' for c in dst_cols)",
-            "    conn.execute('ATTACH DATABASE ? AS bak', (bak_path,))",
-            "    conn.execute('BEGIN IMMEDIATE')",
-            "    try:",
-            "        cur = conn.execute(",
-            "            f'INSERT INTO main.conversation_summaries ({qcols}) '",
-            "            f'SELECT {qcols} FROM bak.conversation_summaries WHERE 1 '",
-            "            'ON CONFLICT(\"conversation_id\") DO NOTHING'",
-            "        )",
-            "        inserted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0",
-            "        conn.execute('COMMIT')",
-            "    except Exception:",
-            "        conn.execute('ROLLBACK')",
-            "        raise",
-            "    print(f'Restored {inserted} missing row(s) into {dst_path}.')",
-            "finally:",
-            "    conn.close()",
-            "PY",
-            "else",
-            '  for sc in "${TARGET}-wal" "${TARGET}-shm" "${TARGET}-journal"; do',
-            '    if [ -e "$sc" ] || [ -L "$sc" ]; then',
-            '      echo "ERROR: target DB is missing but leftover sidecar exists: $sc" >&2',
-            "      exit 1",
-            "    fi",
-            "  done",
-            '  mkdir -p "$(dirname "$TARGET")"',
-            '  cp "$BACKUP" "$TARGET"',
-            '  echo "Restored full snapshot to: $TARGET"',
-            "fi",
+            '[ -f "$TARGET" ] || { echo "ERROR: $TARGET not found." >&2; exit 1; }',
+            '# Any lsof output (open handle, error, or lsof missing) refuses the restore.',
+            'busy="$(lsof -n -P -- "$TARGET" 2>&1 || true)"',
+            '[ -z "$busy" ] || { echo "ERROR: T3 Code may still be running: $busy" >&2; exit 1; }',
+            'cd "$BUNDLE_DIR"',
+            """/usr/bin/sqlite3 -bail "$TARGET" "ATTACH 'conversation_summaries.db' AS bak;""",
+            "INSERT INTO main.conversation_summaries SELECT * FROM bak.conversation_summaries",
+            "WHERE conversation_id NOT IN (SELECT conversation_id FROM main.conversation_summaries);",
+            """SELECT 'Restored ' || changes() || ' missing row(s).';" """,
             "",
         ])
         restore_path = bundle_dir / "restore.sh"
@@ -1694,10 +1567,10 @@ def backup_summaries_to_trash(acp_dir: Path, *, multi_profile: bool = False) -> 
 
 def prune_summaries_db(
     acp_dir: Path, remove_ids: List[str], *, multi_profile: bool = False
-) -> Tuple[int, str, Optional[str]]:
+) -> Tuple[int, str]:
     sdb = acp_dir / "conversation_summaries.db"
     if not sdb.is_file() or not remove_ids:
-        return 0, "", None
+        return 0, ""
     ro_conn = open_readonly_sqlite(sdb)
     try:
         verify_summaries_contract(ro_conn)
@@ -1721,12 +1594,7 @@ def prune_summaries_db(
         except Exception as exc:
             raise SummariesPruneError(str(exc), backup_name) from exc
 
-        vacuum_err: Optional[str] = None
-        try:
-            cur.execute("VACUUM")
-        except Exception as exc:
-            vacuum_err = str(exc)
-        return deleted, backup_name, vacuum_err
+        return deleted, backup_name
     finally:
         conn.close()
 
@@ -1932,7 +1800,7 @@ def session_note(s: SessionRecord, tr: Translator) -> str:
 
 
 def colorize(st: Style, color: str, text: str) -> str:
-    return getattr(st, {"red": "bold_red", "accent": "accent_bold"}.get(color, color), st.subtle)(text)
+    return getattr(st, color, st.subtle)(text)
 
 
 def make_session_tuples(
@@ -1996,10 +1864,7 @@ def print_report(reports: List[ProfileReport], args: argparse.Namespace, st: Sty
     now = time.time()
     width = term_width()
     inner_w = width - 6
-    mode_label = (
-        st.bold_red(tr("cli_apply_perm")) if (args.apply and args.permanent)
-        else (st.bold_cyan(tr("cli_apply_trash")) if args.apply else st.accent_bold(tr("cli_preview")))
-    )
+    mode_label = st.bold_cyan(tr("cli_apply_trash")) if args.apply else st.accent_bold(tr("cli_preview"))
     meta = st.subtle(tr(
         "cli_meta", h=f"{args.min_age:g}",
         s=tr("on") if args.include_superseded else tr("off"),
@@ -2040,7 +1905,7 @@ def print_report(reports: List[ProfileReport], args: argparse.Namespace, st: Sty
             for s, t in zip(items, tuples):
                 print(format_plain_session_row(st, s, t, widths, tr, ov))
 
-        render_section(tr("sec_clean"), to_clean, "red" if args.permanent else "yellow", tr("b_perm") if args.permanent else tr("b_trash"))
+        render_section(tr("sec_clean"), to_clean, "yellow", tr("b_trash"))
         render_section(tr("sec_skip"), skipped, "yellow", tr("b_skip"))
         render_section(tr("sec_report"), report_only, "lavender")
 
@@ -2048,10 +1913,10 @@ def print_report(reports: List[ProfileReport], args: argparse.Namespace, st: Sty
         if args.verbose and active:
             render_section(tr("sec_active"), active, "green")
         else:
-            print(f"\n  {st.green('✓')} {tr('sec_active')}：{st.hi(str(len(active)))} ({format_bytes(act_bytes)})  " + st.dim(f"[{tr('cli_expand_hint')}]"))
+            print(f"\n  {st.green('✓')} {tr('sec_active')}{tr('colon')}{st.hi(str(len(active)))} ({format_bytes(act_bytes)})  " + st.dim(f"[{tr('cli_expand_hint')}]"))
 
         free_txt = st.green(f"({tr('cli_free_est', sz=format_bytes(sel_bytes))})") if sel_bytes > 0 else st.dim(f"({tr('cli_no_free')})")
-        print(f"\n  {st.subtle(tr('cli_space') + '：')}{format_bytes(total_bytes)}  →  {st.hi(format_bytes(total_bytes - sel_bytes))}  {free_txt}")
+        print(f"\n  {st.subtle(tr('cli_space') + tr('colon'))}{format_bytes(total_bytes)}  →  {st.hi(format_bytes(total_bytes - sel_bytes))}  {free_txt}")
         if rep.summaries_db_exists:
             n_idx = len(rep.orphan_summary_ids)
             print(f"  {st.subtle(tr('cli_idx_left', n=n_idx) if n_idx > 0 else tr('cli_idx_clean'))}")
@@ -2089,6 +1954,8 @@ def read_key() -> str:
             ready, _, _ = select.select(watch, [], [])
         except InterruptedError:
             continue
+        except KeyboardInterrupt:  # cbreak keeps ISIG on, so Ctrl-C arrives as SIGINT
+            return "ctrl_c"
         if winch_fd is not None and winch_fd in ready:
             _drain_fd(winch_fd)
             return "resize"
@@ -2272,7 +2139,7 @@ def tui_per_session_selector(
                 is_cur = idx == cursor
                 is_checked = (s.acp_dir, s.uuid) in checked
                 dot = st.dim("·") if not s.selectable_in_tui else (
-                    (st.bold_red("◉") if args.permanent else st.yellow("◉")) if is_checked else st.subtle("○")
+                    st.yellow("◉") if is_checked else st.subtle("○")
                 )
                 ptr = st.accent_bold("❯ ") if is_cur else "  "
                 title_str = truncate_width(t[5], tw)
@@ -2283,8 +2150,7 @@ def tui_per_session_selector(
                 elif not s.selectable_in_tui:
                     fns = (st.dim,) * 6
                 elif is_checked:
-                    cf = st.red if args.permanent else st.yellow
-                    fns = (cf, st.subtle, cf, st.dim, st.subtle, cf)
+                    fns = (st.yellow, st.subtle, st.yellow, st.dim, st.subtle, st.yellow)
                 else:
                     _, b_col = session_badge(s, tr)
                     fns = (lambda x, c=b_col: colorize(st, c, x), st.dim, st.subtle, st.dim, st.dim, lambda x: x)
@@ -2397,7 +2263,6 @@ def tui_confirm_cleanup(
     only_cleaned_summaries: bool = False,
     can_toggle_prune: bool = False,
     prune_block_reason: Optional[str] = None,
-    permanent: bool,
     st: Style,
     tr: Translator,
 ) -> Optional[bool]:
@@ -2412,8 +2277,8 @@ def tui_confirm_cleanup(
         max_offset = max(0, len(chosen) - max_items)
         offset = max(0, min(offset, max_offset))
 
-        h_left = st.bold_red("◆ " + tr("v_confirm_title_perm")) if permanent else (st.accent("◆ ") + st.hi(tr("v_confirm_title")))
-        h_right = st.red(tr("v_confirm_sub_perm")) if permanent else st.subtle(tr("v_confirm_sub_trash"))
+        h_left = st.accent("◆ ") + st.hi(tr("v_confirm_title"))
+        h_right = st.subtle(tr("v_confirm_sub_trash"))
         buf = ["", box_top(st, inner_w), box_split_row(st, h_left, h_right, inner_w), box_row(st, "", inner_w)]
 
         if chosen:
@@ -2451,11 +2316,9 @@ def tui_confirm_cleanup(
                 buf.append(box_row(st, pfx + txt_fn(wl), inner_w))
         buf.extend([box_bottom(st, inner_w), ""])
 
-        opts = ((tr("v_confirm_ok_perm") if permanent else tr("v_confirm_ok"), permanent), (tr("v_confirm_cancel"), False))
-        for idx, (label, is_danger) in enumerate(opts):
+        for idx, label in enumerate((tr("v_confirm_ok"), tr("v_confirm_cancel"))):
             if focus == idx:
-                fn = st.bold_red if is_danger else st.accent_bold
-                buf.append(f"  {fn('❯ ')}{fn(label)}")
+                buf.append(f"  {st.accent_bold('❯ ')}{st.accent_bold(label)}")
             else:
                 buf.append(f"    {st.subtle(label)}")
 
@@ -2487,7 +2350,7 @@ def tui_confirm_cleanup(
 
 
 def tui_show_cleanup_result(
-    outcome: CleanupOutcome, *, permanent: bool, st: Style, tr: Translator
+    outcome: CleanupOutcome, *, st: Style, tr: Translator
 ) -> None:
     offset = 0
     items = outcome.display_items or [("info", tr("no_work"))]
@@ -2520,7 +2383,7 @@ def tui_show_cleanup_result(
             st.bold_red("◆ " + tr("v_result_title_err")) if is_err
             else st.yellow("◆ " + tr("v_result_title_warn"))
         )
-        h_right = st.bold_red(tr("mode_perm")) if permanent else st.subtle(tr("mode_trash_short"))
+        h_right = st.subtle(tr("mode_trash_short"))
         buf = ["", box_top(st, inner_w), box_split_row(st, h_left, h_right, inner_w), box_row(st, "", inner_w)]
         if offset > 0:
             buf.append(box_row(st, st.dim(f"  ↑ +{offset}"), inner_w))
@@ -2564,7 +2427,7 @@ class MenuSnapshot:
     orphan_summary_cnt: int
     prunable_orphan_cnt: int
     any_summaries_db: bool
-    staging_warnings: List[Tuple[Path, List[Path]]]
+    staging_leftovers: List[Path]
     profiles_busy: bool
 
     @property
@@ -2598,7 +2461,7 @@ def build_menu_snapshot(reports: Sequence[ProfileReport]) -> MenuSnapshot:
         orphan_summary_cnt=sum(len(r.orphan_summary_ids) for r in reports),
         prunable_orphan_cnt=sum(len(r.orphan_summary_ids) for r in reports if not r.staging_leftovers),
         any_summaries_db=any(r.summaries_db_exists for r in reports),
-        staging_warnings=[(r.acp_dir, r.staging_leftovers) for r in reports if r.staging_leftovers],
+        staging_leftovers=[p for r in reports for p in r.staging_leftovers],
         profiles_busy=busy,
     )
 
@@ -2608,19 +2471,15 @@ def _fmt_items_pair(items: Sequence[SessionRecord], tr: Translator) -> str:
 
 
 def _render_home_card(
-    snap: MenuSnapshot, h_str: str, permanent: bool, inner_w: int, st: Style, tr: Translator
+    snap: MenuSnapshot, h_str: str, inner_w: int, st: Style, tr: Translator
 ) -> List[str]:
     body_w = inner_w - 4
 
-    mode_badge = (
-        st.bold_red(tr("mode_perm")) if permanent
-        else st.subtle(tr("mode_trash") if body_w >= 68 else tr("mode_trash_short"))
-    )
-    sub = tr("app_sub") if body_w >= 64 else tr("app_sub_short")
+    mode_badge = st.subtle(tr("mode_trash") if body_w >= 68 else tr("mode_trash_short"))
     buf = [
         "",
         box_top(st, inner_w),
-        box_split_row(st, st.accent("◆ ") + st.hi("t3-session-cleaner") + st.subtle(f"  {sub}"), mode_badge, inner_w),
+        box_split_row(st, st.accent("◆ ") + st.hi("t3-session-cleaner") + st.subtle(f"  {tr('app_sub')}"), mode_badge, inner_w),
         box_row(st, "", inner_w),
     ]
 
@@ -2632,8 +2491,7 @@ def _render_home_card(
     if snap.total_bytes == 0:
         buf.append(box_split_row(st, left_total, st.subtle(tr("status_empty")), inner_w))
     elif del_bytes + other_bytes == 0:
-        clean_badge = st.green(tr("status_all_clean") if body_w >= 62 else tr("status_all_clean_short"))
-        buf.append(box_split_row(st, left_total, clean_badge, inner_w))
+        buf.append(box_split_row(st, left_total, st.green(tr("status_all_clean")), inner_w))
     else:
         act_p, del_p, oth_p = fmt_pct(act_bytes, snap.total_bytes), fmt_pct(del_bytes, snap.total_bytes), fmt_pct(other_bytes, snap.total_bytes)
         parts = [f"{st.green('●')} {tr('legend_active')} {act_p}"]
@@ -2689,10 +2547,9 @@ def _render_home_card(
     buf.extend(box_row(st, left + col_sep + right, inner_w) for left, right in metric_rows)
     if snap.del_locked:
         buf.append(box_row(st, st.yellow("⚠ " + tr("locked_warn", n=len(snap.del_locked))), inner_w))
-    for _acp_dir, leftovers in snap.staging_warnings:
-        for warn in format_staging_warnings(leftovers, tr):
-            for wl in wrap_display_lines("⚠ " + warn, body_w):
-                buf.append(box_row(st, st.yellow(wl), inner_w))
+    for warn in format_staging_warnings(snap.staging_leftovers, tr):
+        for wl in wrap_display_lines("⚠ " + warn, body_w):
+            buf.append(box_row(st, st.yellow(wl), inner_w))
     buf.append(box_bottom(st, inner_w))
     return buf
 
@@ -2716,17 +2573,15 @@ def can_prune_summaries_now(
     return (False, 0, "staging") if has_staging_blocked else (False, 0, None)
 
 
-def _summarize_cleanup_notice(outcome: CleanupOutcome, permanent: bool, tr: Translator) -> Tuple[str, str]:
+def _summarize_cleanup_notice(outcome: CleanupOutcome, tr: Translator) -> Tuple[str, str]:
     if outcome.has_errors or outcome.exit_code != 0:
         return ("warn", tr("notice_done_err"))
     if outcome.has_warnings:
         return ("warn", tr("notice_done_warn"))
     if outcome.cleaned_count > 0 and outcome.pruned_rows > 0:
-        key = "notice_done_perm_idx" if permanent else "notice_done_trash_idx"
-        return ("info", tr(key, n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes), r=outcome.pruned_rows))
+        return ("info", tr("notice_done_trash_idx", n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes), r=outcome.pruned_rows))
     if outcome.cleaned_count > 0:
-        key = "notice_done_perm" if permanent else "notice_done_trash"
-        return ("info", tr(key, n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes)))
+        return ("info", tr("notice_done_trash", n=outcome.cleaned_count, sz=format_bytes(outcome.cleaned_bytes)))
     if outcome.pruned_rows > 0:
         return ("info", tr("notice_done_idx", r=outcome.pruned_rows))
     return ("info", tr("no_work"))
@@ -2784,7 +2639,6 @@ def run_interactive_menu(
     session_stderr: List[str] = []
     executed_any = False
     last_rc = 0
-    pending_result: Optional[CleanupOutcome] = None
 
     def flush_session_logs() -> None:
         for line in session_stdout:
@@ -2801,12 +2655,12 @@ def run_interactive_menu(
         snap = build_menu_snapshot(reports)
 
     def run_and_refresh(
-        chosen: List[SessionRecord], do_prune: bool, only_cleaned: bool, permanent: bool
+        chosen: List[SessionRecord], do_prune: bool, only_cleaned: bool
     ) -> Tuple[Optional[CleanupOutcome], Optional[int]]:
         nonlocal cursor, status_notice, executed_any, last_rc
         outcome = _run_cleanup(
             t3_home, reports, chosen, prune_summaries=do_prune, prune_only_cleaned=only_cleaned,
-            permanent=permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
+            skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
         )
         executed_any = True
         session_stdout.extend(outcome.stdout_lines)
@@ -2814,7 +2668,7 @@ def run_interactive_menu(
         last_rc = outcome.exit_code
         if outcome.exit_code == 2:
             return None, 2
-        status_notice = _summarize_cleanup_notice(outcome, permanent, tr)
+        status_notice = _summarize_cleanup_notice(outcome, tr)
         try:
             reload_plan()
             refreshed = build_menu_items()
@@ -2828,200 +2682,169 @@ def run_interactive_menu(
         show_res = outcome if (outcome.has_warnings or outcome.has_errors or outcome.exit_code != 0) else None
         return show_res, None
 
-    while True:
-        pending_perm_action: Optional[Tuple[List[SessionRecord], bool, bool]] = None
-        fatal_rc: Optional[int] = None
+    fatal_rc: Optional[int] = None
 
-        with RawTerminalSession():
-            if pending_result is not None:
-                tui_show_cleanup_result(pending_result, permanent=args.permanent, st=st, tr=tr)
-                pending_result = None
+    with RawTerminalSession():
+        while True:
+            menu_items = build_menu_items()
+            width = term_width()
+            inner_w = width - 6
+            body_w = inner_w - 4
 
-            while True:
-                menu_items = build_menu_items()
-                width = term_width()
-                inner_w = width - 6
-                body_w = inner_w - 4
+            buf = _render_home_card(snap, h_str, inner_w, st, tr)
+            buf.append("")
 
-                buf = _render_home_card(snap, h_str, args.permanent, inner_w, st, tr)
-                buf.append("")
+            name_w = max(display_width(item[1]) for item in menu_items)
+            for idx, (key, name, desc, stat_txt, actionable) in enumerate(menu_items):
+                if key == "details":
+                    buf.append("")
+                is_cur = idx == cursor
+                is_cleanup_stat = key in ("std", "deep", "summaries") and actionable
+                name_pad = pad_right(name, name_w)
+                sw = display_width(stat_txt)
+                desc_str = truncate_width(desc, max(8, body_w - name_w - 3 - (sw + 2 if sw else 0))) if desc else ""
+                gap = " " * max(2, body_w - name_w - (3 + display_width(desc_str) if desc_str else 0) - sw)
 
-                name_w = max(display_width(item[1]) for item in menu_items)
-                for idx, (key, name, desc, stat_txt, actionable) in enumerate(menu_items):
-                    if key == "details":
-                        buf.append("")
-                    is_cur = idx == cursor
-                    is_cleanup_stat = key in ("std", "deep", "summaries") and actionable
-                    name_pad = pad_right(name, name_w)
-                    sw = display_width(stat_txt)
-                    desc_str = truncate_width(desc, max(8, body_w - name_w - 3 - (sw + 2 if sw else 0))) if desc else ""
-                    gap = " " * max(2, body_w - name_w - (3 + display_width(desc_str) if desc_str else 0) - sw)
-
-                    if not is_cur and not actionable:
-                        buf.append(f"     {st.dim(name_pad + (f'   {desc_str}' if desc_str else '') + gap + stat_txt)}")
-                        continue
-
-                    s_col = (
-                        st.green(stat_txt) if is_cleanup_stat
-                        else (st.subtle(stat_txt) if (is_cur and stat_txt and stat_txt != "—") else st.dim(stat_txt))
-                    )
-                    if is_cur:
-                        ptr = st.accent("❯ ") if not actionable else st.accent_bold("❯ ")
-                        n_col = st.accent(name_pad) if not actionable else st.accent_bold(name_pad)
-                        d_col = f"   {(st.dim if not actionable else st.subtle)(desc_str)}" if desc_str else ""
-                        buf.append(f"   {ptr}{n_col}{d_col}{gap}{s_col}")
-                    else:
-                        n_col = st.subtle(name_pad) if key == "quit" else st.soft(name_pad)
-                        d_col = f"   {st.dim(desc_str)}" if desc_str else ""
-                        buf.append(f"     {n_col}{d_col}{gap}{s_col}")
-
-                buf.append("")
-                if status_notice:
-                    n_kind, n_msg = status_notice
-                    pfx = "✓ " if n_kind == "info" else "⚠ "
-                    color_fn = st.green if n_kind == "info" else st.yellow
-                    for i, wl in enumerate(wrap_display_lines(n_msg, max(20, width - 7))):
-                        buf.append(f"     {color_fn((pfx if i == 0 else '  ') + wl)}")
-                buf.extend(format_footer_lines(
-                    st,
-                    [("↑↓", tr("k_move")), ("Enter", tr("k_confirm")), ("r", tr("k_refresh")), ("l", tr("k_lang")), ("Esc", tr("k_quit"))],
-                    width, margin="     ",
-                ))
-                paint_screen(buf)
-
-                k = read_key()
-                if k == "resize":
-                    continue
-                status_notice = None
-                if k in ("esc", "q", "ctrl_c"):
-                    break
-                if k == "l":
-                    tr.toggle_and_save()
-                    continue
-                if k == "r":
-                    try:
-                        reload_plan()
-                        status_notice = ("info", tr("notice_refreshed"))
-                    except Exception as exc:
-                        status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
-                    continue
-                if k in ("up", "k"):
-                    cursor = (cursor - 1) % len(menu_items)
-                    continue
-                if k in ("down", "j"):
-                    cursor = (cursor + 1) % len(menu_items)
-                    continue
-                if k != "enter":
+                if not is_cur and not actionable:
+                    buf.append(f"     {st.dim(name_pad + (f'   {desc_str}' if desc_str else '') + gap + stat_txt)}")
                     continue
 
-                action_key = menu_items[cursor][0]
-                if action_key == "quit":
-                    break
-                if action_key == "details":
-                    tui_view_all_sessions(reports, st, tr)
-                    continue
-
-                chosen: List[SessionRecord] = []
-                do_prune_summaries = False
-                only_cleaned_summaries = False
-                can_toggle_prune = False
-                prune_block_reason: Optional[str] = None
-                est_orphans = 0
-
-                if action_key in ("std", "deep"):
-                    targets = snap.std_targets if action_key == "std" else snap.deep_targets
-                    if not targets:
-                        status_notice = ("warn", tr("notice_no_std" if action_key == "std" else "notice_no_deep"))
-                        continue
-                    chosen = list(targets)
-                    only_cleaned_summaries = True
-                    can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
-                        reports, snap, chosen, only_cleaned=True
-                    )
-                    do_prune_summaries = can_prune
-                    can_toggle_prune = can_prune
-                elif action_key == "summaries":
-                    if snap.orphan_summary_cnt == 0:
-                        status_notice = ("warn", tr("notice_idx_clean"))
-                        continue
-                    if snap.prunable_orphan_cnt == 0:
-                        status_notice = ("warn", tr("notice_idx_staging"))
-                        continue
-                    if snap.profiles_busy:
-                        status_notice = ("warn", tr("notice_idx_busy"))
-                        continue
-                    est_orphans = estimate_pruned_summaries(reports, [])
-                    do_prune_summaries = True
-                elif action_key == "custom":
-                    res = tui_per_session_selector(reports, snap, args, st, tr)
-                    if res is None:
-                        continue
-                    chosen, sel_prune = res
-                    if not chosen:
-                        status_notice = ("warn", tr("notice_none_sel"))
-                        continue
-                    only_cleaned_summaries = True
-                    can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
-                        reports, snap, chosen, only_cleaned=True
-                    )
-                    do_prune_summaries = sel_prune and can_prune
-                    can_toggle_prune = can_prune
-
-                # R09: -y applies ONLY to CLI --apply mode, never bypasses TUI confirmation.
-                confirmed_prune = tui_confirm_cleanup(
-                    chosen,
-                    prune_summaries=do_prune_summaries,
-                    orphan_summary_count=est_orphans,
-                    only_cleaned_summaries=only_cleaned_summaries,
-                    can_toggle_prune=can_toggle_prune,
-                    prune_block_reason=prune_block_reason,
-                    permanent=args.permanent,
-                    st=st,
-                    tr=tr,
+                s_col = (
+                    st.green(stat_txt) if is_cleanup_stat
+                    else (st.subtle(stat_txt) if (is_cur and stat_txt and stat_txt != "—") else st.dim(stat_txt))
                 )
-                if confirmed_prune is None:
-                    status_notice = ("warn", tr("notice_cancelled"))
+                if is_cur:
+                    ptr = st.accent("❯ ") if not actionable else st.accent_bold("❯ ")
+                    n_col = st.accent(name_pad) if not actionable else st.accent_bold(name_pad)
+                    d_col = f"   {(st.dim if not actionable else st.subtle)(desc_str)}" if desc_str else ""
+                    buf.append(f"   {ptr}{n_col}{d_col}{gap}{s_col}")
+                else:
+                    n_col = st.subtle(name_pad) if key == "quit" else st.soft(name_pad)
+                    d_col = f"   {st.dim(desc_str)}" if desc_str else ""
+                    buf.append(f"     {n_col}{d_col}{gap}{s_col}")
+
+            buf.append("")
+            if status_notice:
+                n_kind, n_msg = status_notice
+                pfx = "✓ " if n_kind == "info" else "⚠ "
+                color_fn = st.green if n_kind == "info" else st.yellow
+                for i, wl in enumerate(wrap_display_lines(n_msg, max(20, width - 7))):
+                    buf.append(f"     {color_fn((pfx if i == 0 else '  ') + wl)}")
+            buf.extend(format_footer_lines(
+                st,
+                [("↑↓", tr("k_move")), ("Enter", tr("k_confirm")), ("r", tr("k_refresh")), ("l", tr("k_lang")), ("Esc", tr("k_quit"))],
+                width, margin="     ",
+            ))
+            paint_screen(buf)
+
+            k = read_key()
+            if k == "resize":
+                continue
+            status_notice = None
+            if k in ("esc", "q", "ctrl_c"):
+                break
+            if k == "l":
+                tr.toggle_and_save()
+                continue
+            if k == "r":
+                try:
+                    reload_plan()
+                    status_notice = ("info", tr("notice_refreshed"))
+                except Exception as exc:
+                    status_notice = ("warn", tr("notice_refresh_err", err=str(exc)))
+                continue
+            if k in ("up", "k"):
+                cursor = (cursor - 1) % len(menu_items)
+                continue
+            if k in ("down", "j"):
+                cursor = (cursor + 1) % len(menu_items)
+                continue
+            if k != "enter":
+                continue
+
+            action_key = menu_items[cursor][0]
+            if action_key == "quit":
+                break
+            if action_key == "details":
+                tui_view_all_sessions(reports, st, tr)
+                continue
+
+            chosen: List[SessionRecord] = []
+            do_prune_summaries = False
+            only_cleaned_summaries = False
+            can_toggle_prune = False
+            prune_block_reason: Optional[str] = None
+            est_orphans = 0
+
+            if action_key in ("std", "deep"):
+                targets = snap.std_targets if action_key == "std" else snap.deep_targets
+                if not targets:
+                    status_notice = ("warn", tr("notice_no_std" if action_key == "std" else "notice_no_deep"))
                     continue
+                chosen = list(targets)
+                only_cleaned_summaries = True
+                can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
+                    reports, snap, chosen, only_cleaned=True
+                )
+                do_prune_summaries = can_prune
+                can_toggle_prune = can_prune
+            elif action_key == "summaries":
+                if snap.orphan_summary_cnt == 0:
+                    status_notice = ("warn", tr("notice_idx_clean"))
+                    continue
+                if snap.prunable_orphan_cnt == 0:
+                    status_notice = ("warn", tr("notice_idx_staging"))
+                    continue
+                if snap.profiles_busy:
+                    status_notice = ("warn", tr("notice_idx_busy"))
+                    continue
+                est_orphans = estimate_pruned_summaries(reports, [])
+                do_prune_summaries = True
+            elif action_key == "custom":
+                res = tui_per_session_selector(reports, snap, args, st, tr)
+                if res is None:
+                    continue
+                chosen, sel_prune = res
+                if not chosen:
+                    status_notice = ("warn", tr("notice_none_sel"))
+                    continue
+                only_cleaned_summaries = True
+                can_prune, est_orphans, prune_block_reason = can_prune_summaries_now(
+                    reports, snap, chosen, only_cleaned=True
+                )
+                do_prune_summaries = sel_prune and can_prune
+                can_toggle_prune = can_prune
 
-                if args.permanent:
-                    pending_perm_action = (chosen, confirmed_prune, only_cleaned_summaries)
-                    break
+            # R09: -y applies ONLY to CLI --apply mode, never bypasses TUI confirmation.
+            confirmed_prune = tui_confirm_cleanup(
+                chosen,
+                prune_summaries=do_prune_summaries,
+                orphan_summary_count=est_orphans,
+                only_cleaned_summaries=only_cleaned_summaries,
+                can_toggle_prune=can_toggle_prune,
+                prune_block_reason=prune_block_reason,
+                st=st,
+                tr=tr,
+            )
+            if confirmed_prune is None:
+                status_notice = ("warn", tr("notice_cancelled"))
+                continue
 
-                show_res, fatal_rc = run_and_refresh(chosen, confirmed_prune, only_cleaned_summaries, False)
-                if fatal_rc is not None:
-                    break
-                if show_res is not None:
-                    tui_show_cleanup_result(show_res, permanent=False, st=st, tr=tr)
+            show_res, fatal_rc = run_and_refresh(chosen, confirmed_prune, only_cleaned_summaries)
+            if fatal_rc is not None:
+                break
+            if show_res is not None:
+                tui_show_cleanup_result(show_res, st=st, tr=tr)
 
-        if fatal_rc is not None:
-            flush_session_logs()
-            return fatal_rc
+    if fatal_rc is not None:
+        flush_session_logs()
+        return fatal_rc
 
-        if pending_perm_action is None:
-            if executed_any:
-                flush_session_logs()
-                return last_rc
-            print(tr("exit_clean"))
-            return 0
-
-        chosen, do_prune_summaries, only_cleaned_summaries = pending_perm_action
-        confirm_res = confirm_execution(
-            chosen, prune_summaries=do_prune_summaries,
-            orphan_summary_count=estimate_pruned_summaries(reports, chosen, only_cleaned=only_cleaned_summaries),
-            prune_only_cleaned=only_cleaned_summaries,
-            permanent=True, assume_yes=False, st=st, tr=tr,
-        )
-        if confirm_res == "nontty":
-            flush_session_logs()
-            return 1
-        if confirm_res != "yes":
-            status_notice = ("warn", tr("notice_cancelled"))
-            continue
-
-        pending_result, fatal_rc = run_and_refresh(chosen, do_prune_summaries, only_cleaned_summaries, True)
-        if fatal_rc is not None:
-            flush_session_logs()
-            return fatal_rc
+    if executed_any:
+        flush_session_logs()
+        return last_rc
+    print(tr("exit_clean"))
+    return 0
 
 
 # ------------------------- Confirmation & Execution -------------------------
@@ -3029,7 +2852,7 @@ def run_interactive_menu(
 
 def confirm_execution(
     chosen: List[SessionRecord], *, prune_summaries: bool, orphan_summary_count: int,
-    permanent: bool, assume_yes: bool, st: Style, tr: Translator, prune_only_cleaned: bool = False,
+    assume_yes: bool, st: Style, tr: Translator,
 ) -> str:
     """Returns 'yes', 'no', or 'nontty'."""
     if assume_yes:
@@ -3045,11 +2868,9 @@ def confirm_execution(
         for s in chosen:
             print(f"    • {st.dim(s.uuid[:8])}  {pad_left(format_bytes(s.size_bytes), 9)}  {truncate_width(session_title(s, tr), 42)}  {st.dim('[' + s.category + ']')}")
     if prune_summaries:
-        print("  " + tr("v_confirm_idx_matched" if prune_only_cleaned else "v_confirm_idx", n=orphan_summary_count))
+        print("  " + tr("v_confirm_idx", n=orphan_summary_count))
 
     try:
-        if permanent:
-            return "yes" if input(st.bold_red(tr("confirm_perm_prompt"))).strip() == "DELETE" else "no"
         return "yes" if input(st.accent_bold(tr("confirm_trash_prompt"))).strip().lower() in ("y", "yes") else "no"
     except (EOFError, KeyboardInterrupt):
         print()
@@ -3058,7 +2879,7 @@ def confirm_execution(
 
 def _run_cleanup(
     t3_home: Path, reports: List[ProfileReport], chosen: List[SessionRecord], *,
-    prune_summaries: bool, permanent: bool, skip_lsof: bool, st: Style, tr: Translator,
+    prune_summaries: bool, skip_lsof: bool, st: Style, tr: Translator,
     min_age_hours: float = 24.0, prune_only_cleaned: bool = False,
 ) -> CleanupOutcome:
     out = CleanupOutcome()
@@ -3097,43 +2918,32 @@ def _run_cleanup(
     cleaned_uuids_by_acp: Dict[Path, Set[str]] = {}
 
     if approved:
-        if permanent:
-            for s in approved:
-                try:
-                    remove_permanently(s.paths)
-                    out.cleaned_count += 1
-                    out.cleaned_bytes += s.size_bytes
-                    cleaned_uuids_by_acp.setdefault(s.acp_dir, set()).add(s.uuid)
-                except Exception as exc:
-                    add_err(f"{s.uuid}: {exc}")
-                    any_file_error = True
-        else:
-            by_profile: Dict[Path, List[SessionRecord]] = {}
-            for s in approved:
-                by_profile.setdefault(s.acp_dir, []).append(s)
-            ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            multi_profile = len(by_profile) > 1
-            for acp_dir, prof_sessions in by_profile.items():
-                prof_tag = acp_dir.parent.name[:12]
-                try:
-                    bname = trash_profile_bundle(acp_dir, prof_sessions, tr, ts=ts, multi_profile=multi_profile)
-                    out.cleaned_count += len(prof_sessions)
-                    out.cleaned_bytes += sum(s.size_bytes for s in prof_sessions)
-                    cleaned_uuids_by_acp.setdefault(acp_dir, set()).update(s.uuid for s in prof_sessions)
-                    add_ok(tr("trashed_bundle", name=bname), tr("trashed_bundle", name=st.hi(bname)))
-                except UncertainTrashError as exc:
-                    add_err(tr("trash_uncertain", p=prof_tag, name=exc.bundle_name, err=exc.reason))
-                    if exc.bundle_dir is not None:
-                        out.stderr_lines.append(f"    {st.subtle(str(exc.bundle_dir))}")
-                        out.display_items.append(("info", str(exc.bundle_dir)))
-                    any_file_error = True
-                except PartialRollbackError as exc:
-                    unrolled = ", ".join(p.name for p in exc.failed_paths)
-                    add_err(tr("trash_partial_rollback", p=prof_tag, path=str(exc.bundle_dir), files=unrolled))
-                    any_file_error = True
-                except Exception as exc:
-                    add_err(tr("trash_profile_failed", p=prof_tag, err=str(exc)))
-                    any_file_error = True
+        by_profile: Dict[Path, List[SessionRecord]] = {}
+        for s in approved:
+            by_profile.setdefault(s.acp_dir, []).append(s)
+        ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        multi_profile = len(by_profile) > 1
+        for acp_dir, prof_sessions in by_profile.items():
+            prof_tag = acp_dir.parent.name[:12]
+            try:
+                bname = trash_profile_bundle(acp_dir, prof_sessions, tr, ts=ts, multi_profile=multi_profile)
+                out.cleaned_count += len(prof_sessions)
+                out.cleaned_bytes += sum(s.size_bytes for s in prof_sessions)
+                cleaned_uuids_by_acp.setdefault(acp_dir, set()).update(s.uuid for s in prof_sessions)
+                add_ok(tr("trashed_bundle", name=bname), tr("trashed_bundle", name=st.hi(bname)))
+            except UncertainTrashError as exc:
+                add_err(tr("trash_uncertain", p=prof_tag, name=exc.bundle_name, err=exc.reason))
+                if exc.bundle_dir is not None:
+                    out.stderr_lines.append(f"    {st.subtle(str(exc.bundle_dir))}")
+                    out.display_items.append(("info", str(exc.bundle_dir)))
+                any_file_error = True
+            except PartialRollbackError as exc:
+                unrolled = ", ".join(p.name for p in exc.failed_paths)
+                add_err(tr("trash_partial_rollback", p=prof_tag, path=str(exc.bundle_dir), files=unrolled))
+                any_file_error = True
+            except Exception as exc:
+                add_err(tr("trash_profile_failed", p=prof_tag, err=str(exc)))
+                any_file_error = True
 
     if prune_summaries and (not prune_only_cleaned or any(cleaned_uuids_by_acp.values())):
         if any_file_error:
@@ -3190,15 +3000,11 @@ def _run_cleanup(
                         add_warn(tr("skip_idx_busy", p=rep.profile_name[:12]))
                     else:
                         try:
-                            removed_rows, backup_name, vacuum_err = prune_summaries_db(
+                            removed_rows, backup_name = prune_summaries_db(
                                 rep.acp_dir, safe_ids, multi_profile=multi_profile
                             )
                             out.pruned_rows += removed_rows
-                            if vacuum_err:
-                                add_ok(tr("pruned_rows_novac", n=removed_rows))
-                                add_warn(tr("vacuum_warn", err=vacuum_err))
-                            else:
-                                add_ok(tr("pruned_rows", n=removed_rows))
+                            add_ok(tr("pruned_rows", n=removed_rows))
                             if backup_name:
                                 out.stdout_lines.append(f"    {st.subtle(tr('backup_saved', name=st.hi(backup_name)))}")
                                 out.display_items.append(("info", tr("backup_saved", name=backup_name)))
@@ -3213,20 +3019,19 @@ def _run_cleanup(
                             add_err(f"conversation_summaries.db: {exc}")
 
     if chosen or not prune_summaries:
-        done_key = "done_perm" if permanent else "done_trash"
-        out.stdout_lines.append("\n" + tr(done_key, n=st.hi(str(out.cleaned_count)), sz=st.green(format_bytes(out.cleaned_bytes))))
-        out.display_items.append(("ok" if not out.has_errors else "info", tr(done_key, n=str(out.cleaned_count), sz=format_bytes(out.cleaned_bytes))))
+        out.stdout_lines.append("\n" + tr("done_trash", n=st.hi(str(out.cleaned_count)), sz=st.green(format_bytes(out.cleaned_bytes))))
+        out.display_items.append(("ok" if not out.has_errors else "info", tr("done_trash", n=str(out.cleaned_count), sz=format_bytes(out.cleaned_bytes))))
     return out
 
 
 def execute_cleanup(
     t3_home: Path, reports: List[ProfileReport], chosen: List[SessionRecord], *,
-    prune_summaries: bool, permanent: bool, skip_lsof: bool, st: Style, tr: Translator,
+    prune_summaries: bool, skip_lsof: bool, st: Style, tr: Translator,
     min_age_hours: float = 24.0,
 ) -> int:
     outcome = _run_cleanup(
         t3_home, reports, chosen, prune_summaries=prune_summaries,
-        permanent=permanent, skip_lsof=skip_lsof, st=st, tr=tr, min_age_hours=min_age_hours,
+        skip_lsof=skip_lsof, st=st, tr=tr, min_age_hours=min_age_hours,
     )
     for line in outcome.stdout_lines:
         print(line)
@@ -3263,7 +3068,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--include-unknown", action="store_true", help="In CLI mode, also include unreferenced UNKNOWN sessions (use with caution).")
     parser.add_argument("--min-age", type=parse_min_age, default=24.0, metavar="HOURS", help="Cooldown window in hours (default: 24).")
     parser.add_argument("--prune-summaries", action="store_true", help="Also prune stale rows in conversation_summaries.db (requires T3 closed; backs up to Trash first).")
-    parser.add_argument("--permanent", action="store_true", help="Permanently delete instead of moving a single bundle to macOS Trash.")
     parser.add_argument("--lang", choices=("zh", "en"), default=None, help="Override display language for this run (zh or en); defaults to saved preference or system locale.")
     parser.add_argument("--t3-home", type=Path, default=Path.home() / ".t3", help="Override T3 data root directory (default: ~/.t3).")
     parser.add_argument("--skip-lsof", action="store_true", help="Bypass lsof open-file check.")
@@ -3319,7 +3123,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     confirm_res = confirm_execution(
         chosen, prune_summaries=args.prune_summaries, orphan_summary_count=est_orphans,
-        permanent=args.permanent, assume_yes=args.yes, st=st, tr=tr,
+        assume_yes=args.yes, st=st, tr=tr,
     )
     if confirm_res == "nontty":
         return 1
@@ -3329,9 +3133,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     return execute_cleanup(
         t3_home, reports, chosen, prune_summaries=args.prune_summaries,
-        permanent=args.permanent, skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
+        skip_lsof=args.skip_lsof, min_age_hours=args.min_age, st=st, tr=tr,
     )
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
