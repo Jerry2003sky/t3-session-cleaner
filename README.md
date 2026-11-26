@@ -2,12 +2,12 @@
 
 # T3 Session Cleaner
 
-**Safely preview, interactively select, and clean orphaned local sessions left behind by T3 Code on macOS (currently focused on Antigravity).**
+**Safely preview, select, and clean orphaned local sessions left behind after deleting threads in T3 Code** *(macOS, currently focused on Antigravity)*.
 
 [![Release](https://img.shields.io/github/v/release/Jerry2003sky/t3-session-cleaner?label=release)](https://github.com/Jerry2003sky/t3-session-cleaner/releases)
-[![macOS 15+](https://img.shields.io/badge/macOS-15%2B-111318?logo=apple&logoColor=white)](#requirements)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](#requirements)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-2ea44f)](#requirements)
+[![macOS 15+](https://img.shields.io/badge/macOS-15%2B-111318?logo=apple&logoColor=white)](#quick-start)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](#quick-start)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-2ea44f)](#quick-start)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 [English](./README.md) · [简体中文](./README.zh-CN.md)
@@ -18,25 +18,12 @@
 
 </div>
 
-> **Unofficial community tool** — not affiliated with T3 Code or Google Antigravity. Verified against T3 Code's `statev2.sqlite` schema on macOS 15+. If T3 Code changes its storage schema (e.g. `statev3.sqlite`), the tool **refuses to run** rather than guessing.
+> [!NOTE]
+> **Unofficial community tool** — not affiliated with T3 Code or Google Antigravity. Verified against T3 Code's `statev2.sqlite` schema; if an unknown schema appears (e.g. `statev3.sqlite`), the tool **refuses to run** rather than guessing.
 
----
+## Quick Start
 
-## Why?
-
-When you delete a conversation in T3 Code, T3 soft-deletes the thread in `statev2.sqlite` and eventually compacts old events, while Antigravity's local session files (`conversations/<uuid>.db`, `brain/<uuid>/`, `annotations/<uuid>.pbtxt`) and `conversation_summaries.db` rows under `~/.t3/userdata/providers/antigravity/` accumulate on disk over time.
-
-`t3-session-cleaner` is a **single-file, zero-dependency** Python 3 CLI/TUI designed to inspect and reclaim that space with fail-closed safety guarantees.
-
-## Highlights
-
-- **Single file, zero dependencies** — pure Python 3 standard library + built-in macOS tools (`/usr/bin/trash`, `lsof`, `ps`).
-- **Interactive TUI & scriptable CLI** — visual storage breakdown, per-session multi-select picker, auto-refreshing dashboard after each cleanup, live rescan (`r`), and one-key English / 中文 toggle (`l`).
-- **Fail-closed safety model** — refuses to run on unknown T3 database schemas, protects active/archived/subagent/in-flight sessions, enforces a 24h cooldown, and re-checks state right before touching disk.
-- **One-click reversible Trash bundle** — moves cleaned files into a single dated folder in macOS Trash along with `manifest.json` and a conflict-safe `restore.sh`.
-- **Safe index syncing** — automatically keeps `conversation_summaries.db` in sync for cleaned sessions when T3 & `agy` are closed (toggleable via `p`; opt-in `--prune-summaries` in CLI), always backing up a WAL-merged snapshot + merge-safe `restore.sh` to Trash first.
-
-## Quick Install
+Requires **macOS 15+** and **Python 3.8+** — single file, zero third-party dependencies (uses built-in `/usr/bin/trash`, `lsof`, and `ps` only).
 
 ```bash
 mkdir -p ~/.local/bin
@@ -44,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/Jerry2003sky/t3-session-cleaner/mai
 chmod +x ~/.local/bin/t3-session-cleaner
 ```
 
-Ensure `~/.local/bin` is in your `$PATH`, then run:
+Make sure `~/.local/bin` is in your `$PATH`, then run:
 
 ```bash
 t3-session-cleaner
@@ -52,9 +39,9 @@ t3-session-cleaner
 
 ## Usage
 
-### Interactive TUI (default in a terminal)
+### Interactive TUI
 
-Running `t3-session-cleaner` inside a TTY opens the interactive dashboard, where you can trigger a standard clean, deep clean, index prune, or drop into the per-session selector:
+Running `t3-session-cleaner` in a terminal opens the dashboard, where you can inspect disk usage, run a standard or deep clean, prune stale index rows, or pick sessions individually:
 
 <p align="center">
   <img src="./assets/tui-select-en.png" alt="t3-session-cleaner per-session selector" width="760" />
@@ -63,82 +50,86 @@ Running `t3-session-cleaner` inside a TTY opens the interactive dashboard, where
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` or `j` / `k` | Move cursor |
-| `Space` | Toggle session selection (in manual picker) |
-| `p` | Toggle syncing `conversation_summaries.db` (in manual picker / confirmation screen when T3 is closed) |
+| `Space` | Toggle session selection (picker view) |
+| `p` | Toggle `conversation_summaries.db` sync (when T3 is closed) |
 | `Enter` | Confirm / open view |
-| `r` | Live rescan disk & T3 running status (e.g. right after quitting T3 to prune the index) |
-| `l` | Toggle English / 中文 live (saved to `~/.config/t3-session-cleaner/config.json`; auto-detected from locale on first run) |
-| `Esc` / `q` | Go back / quit |
+| `r` | Rescan disk & T3 running status |
+| `l` | Switch English / 中文 live |
+| `Esc` / `q` | Back / quit |
 
 ### CLI Mode
 
 ```bash
-# Read-only preview
-t3-session-cleaner -n
-
-# Preview including all active protected sessions
-t3-session-cleaner -n -v
-
-# Clean deleted sessions older than 24h (moves one bundle to macOS Trash)
-t3-session-cleaner --apply
-
-# Also prune stale index rows in conversation_summaries.db (requires T3 closed)
-t3-session-cleaner --apply --prune-summaries
-
-# Override display language for a single run
-t3-session-cleaner --lang en -n
+t3-session-cleaner -n                         # Read-only preview
+t3-session-cleaner -n -v                      # Preview including active protected sessions
+t3-session-cleaner --apply                    # Clean deleted sessions older than 24h (to Trash)
+t3-session-cleaner --apply --prune-summaries  # Also prune stale index rows (requires T3 closed)
+t3-session-cleaner --lang en -n               # Override display language for one run
 ```
 
-Run `t3-session-cleaner --help` for all flags.
+Run `t3-session-cleaner --help` for all options.
 
-## Managed Scope
+## Safety & Restore
 
-`t3-session-cleaner` only inspects and manages `conversations/`, `brain/`, `annotations/`, and (when T3 is closed) `conversation_summaries.db` inside T3's Antigravity profile directory. Other directories such as `implicit/` are **never touched**.
+- **Minimal scope** — only manages `conversations/`, `brain/`, `annotations/`, and (when T3 is closed) `conversation_summaries.db` under T3's Antigravity profile. Directories such as `implicit/` are never touched.
+- **Conservative by default** — protects active/archived threads, nested subagents, in-flight handoffs/transfers, open file handles, and enforces a **24h cooldown**.
+- **One-bundle Trash & restore** — moves cleaned files into a single timestamped folder in macOS Trash with `manifest.json` and a conflict-safe `restore.sh`.
+- **No live DB writes** — `conversation_summaries.db` is never modified while T3 or `agy` is running; any index change backs up a WAL-merged snapshot + `restore.sh` to Trash first.
 
-## Safety Invariants (Fail-Closed)
+### Restoring a Cleaned Bundle
 
-1. **Schema contract check**: Refuses to run (exit code `2`) if a newer/unknown `statev*.sqlite` exists or any required `orchestration_v2_*` table/column is missing.
-2. **Circuit breaker**: Aborts if T3 reports live Antigravity threads and sessions exist on disk, yet zero match the active whitelist.
-3. **Wide whitelist, narrow deletion**: Protects active + archived threads, BFS-expanded nested native subagents, in-flight handoffs/transfers/outbox entries, `ANTIGRAVITY_CONVERSATION_ID`, open `lsof` handles, and a 24-hour cooldown window (computed from the later of T3 `deleted_at` and file `mtime`).
-4. **TOCTOU re-check**: Re-verifies T3 state, category, `mtime`, cooldown, and open handles right before touching disk.
-5. **Restorable Trash bundle & safe DB syncing**:
-   - File cleanup moves session files into **one dated folder** in macOS Trash via `/usr/bin/trash`, bundled with `manifest.json` and a non-overwriting UUID-grouped `restore.sh` (rolls back on failure; preserves staging bundle with `restore.sh` if any rollback fails).
-   - `conversation_summaries.db` is **never touched while T3 (`statev2.sqlite`) or `agy` is running** or when `.t3-clean-staging` leftovers exist. In CLI mode (`--apply`), DB pruning is strictly opt-in (`--prune-summaries`); in interactive TUI mode, when T3 is completely closed and no staging leftover exists, session cleanups automatically remove only the matching rows for the sessions cleaned in that run (explicitly displayed and toggleable with `p` on the confirmation screen; pre-existing stale rows stay untouched for the dedicated **Prune index** action). Before any `DELETE`, it verifies the single-table/no-trigger/no-FK contract and backs up a consistent WAL-merged snapshot (+ merge-safe `restore.sh`) to Trash.
-   - **Index pruning scope**: A row in `conversation_summaries.db` is pruned only if it is not active, has no backing files on disk, **and** satisfies at least one of: (a) marked deleted/superseded in T3 (including recursively expanded subagents of deleted threads), (b) an empty shell row (`step_count = 0` and empty `title`, e.g. T3 `t3-antigravity-setup-*` probe entries), or (c) its session was successfully cleaned during this run.
-
-## Restoring a Cleaned Bundle
-
-Open macOS Trash, drag the `t3-session-cleaner-YYYY-MM-DD_HHMMSS` folder out (e.g. to Desktop), and run:
+Drag `t3-session-cleaner-YYYY-MM-DD_HHMMSS` out of macOS Trash (e.g. to Desktop) and run:
 
 ```bash
 bash ./t3-session-cleaner-YYYY-MM-DD_HHMMSS/restore.sh
 ```
 
-`restore.sh` moves each session back to its exact original paths and skips an entire UUID group if any target file conflicts.
+`restore.sh` moves each session back to its exact original paths and skips an entire UUID group if any target conflicts.
 
-> **Note**: Restoring a session bundle from Trash restores the session files on disk, but does **not** automatically re-insert rows removed from `conversation_summaries.db`. If the index was also synced or pruned, run `restore.sh` inside the corresponding `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer rows. Quit T3 Code first: it refuses to run while T3 or `agy` still has either database open.
+> [!TIP]
+> File restoration does not re-insert removed `conversation_summaries.db` rows. If the index was also synced or pruned, quit T3 Code first and run `restore.sh` inside the matching `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer ones.
 
-## Requirements
+<details>
+<summary><strong>Reference: 5 Fail-Closed Safety Invariants &amp; Index Pruning Rules</strong></summary>
 
-- **macOS 15+ (Sequoia or newer)** with built-in `/usr/bin/trash`, `lsof`, and `ps`
-- **Python 3.8+** (standard library only; no `pip` packages)
+1. **Schema contract check** — refuses to run (exit code `2`) if a newer/unknown `statev*.sqlite` exists or any required `orchestration_v2_*` table or column is missing.
+2. **Circuit breaker** — aborts if T3 reports live Antigravity threads and sessions exist on disk, yet zero match the active whitelist.
+3. **Wide whitelist, narrow deletion** — protects active and archived threads, BFS-expanded nested native subagents, in-flight handoffs/transfers/outbox entries, `ANTIGRAVITY_CONVERSATION_ID`, open `lsof` handles, and a 24-hour cooldown window (computed from the later of T3 `deleted_at` and file `mtime`).
+4. **TOCTOU re-check** — re-verifies T3 state, category, `mtime`, cooldown, and open handles immediately before touching disk.
+5. **Restorable Trash bundle &amp; safe DB syncing**:
+   - **Files**: staged and moved as one timestamped bundle via `/usr/bin/trash` with `manifest.json` and a non-overwriting UUID-grouped `restore.sh` (auto-rolls back on failure; preserves the staging bundle with `restore.sh` if rollback fails).
+   - **Index safety**: `conversation_summaries.db` is never touched while T3 (`statev2.sqlite`) or `agy` is running or while `.t3-clean-staging` leftovers exist. CLI mode requires explicit `--prune-summaries`; TUI session cleanups automatically sync only the sessions cleaned in that run when T3 is completely closed (toggleable via `p`; pre-existing stale rows stay for the dedicated **Prune index** action). Before any `DELETE`, the tool verifies the single-table / no-trigger / no-FK contract and backs up a consistent WAL-merged snapshot (+ merge-safe `restore.sh`, which also refuses to run while T3 or `agy` has either DB open) to Trash.
+   - **Index pruning scope**: a row is pruned only when inactive, unbacked by files on disk, **and** matching at least one of:
+     - marked deleted or superseded in T3 (including recursively expanded subagents of deleted threads);
+     - an empty shell row (`step_count = 0` and empty `title`, e.g. `t3-antigravity-setup-*` probe entries);
+     - a session successfully cleaned during the current run.
 
-## Exit Codes
+</details>
+
+<details>
+<summary><strong>Reference: Paths &amp; Exit Codes</strong></summary>
+
+**Paths**
+
+- Managed data root: `~/.t3/userdata/providers/antigravity/` (`conversations/`, `brain/`, `annotations/`, `conversation_summaries.db`)
+- Saved language preference: `~/.config/t3-session-cleaner/config.json` (auto-detected from system locale on first run)
+
+**Exit Codes**
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success (or user cancelled cleanly) |
 | `1` | Runtime error |
-| `2` | Fail-closed safety/schema contract violation |
+| `2` | Fail-closed safety / schema contract violation |
 
-## Development & Tests
+</details>
+
+## Development & License
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-All tests run in isolated temporary directories with a stub trash binary and never touch `~/.t3`, `~/.config`, or macOS Trash.
+All tests run in isolated temporary directories with a mock `trash` binary and never touch `~/.t3`, `~/.config`, or macOS Trash.
 
-## License
-
-[MIT](./LICENSE)
+Licensed under the [MIT License](./LICENSE).
