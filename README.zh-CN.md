@@ -116,7 +116,7 @@ bash ./t3-session-cleaner-YYYY-MM-DD_HHMMSS/restore.sh
 
 `restore.sh` 会按会话 UUID 整组将文件移回原路径，若目标侧存在同名或同 UUID 冲突则整组跳过、绝不覆盖。
 
-> **注意**：从废纸篓还原会话文件不会自动恢复已从 `conversation_summaries.db` 移除的索引行。如果当时同时同步清理过索引，请另行运行对应 `t3-session-cleaner-summaries-backup-*` 备份目录里的 `restore.sh`，它只会把缺失行补回当前库，不会丢失之后新增的记录。
+> **注意**：从废纸篓还原会话文件不会自动恢复已从 `conversation_summaries.db` 移除的索引行。如果当时同时同步清理过索引，请另行运行对应 `t3-session-cleaner-summaries-backup-*` 备份目录里的 `restore.sh`，它只会把缺失行补回当前库，不会丢失之后新增的记录。运行前请完全退出 T3 Code：只要 T3 或 `agy` 仍占用任一数据库，脚本就会拒绝执行。
 
 ## 运行环境
 

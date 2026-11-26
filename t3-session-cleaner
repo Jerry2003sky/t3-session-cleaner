@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 STRICT_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -547,6 +547,7 @@ class ProfileReport:
     lsof_error: Optional[str] = None
     t3_db_open: bool = False
     t3_lsof_error: Optional[str] = None
+    active_ids: Set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1543,13 +1544,17 @@ def backup_summaries_to_trash(acp_dir: Path, *, multi_profile: bool = False) -> 
             'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"',
             f"TARGET={shlex.quote(str(sdb.resolve()))}",
             '[ -f "$TARGET" ] || { echo "ERROR: $TARGET not found." >&2; exit 1; }',
-            '# Any lsof output (open handle, error, or lsof missing) refuses the restore.',
+            # acp_dir = userdata/providers/antigravity/<profile>/antigravity-acp; T3 holds userdata/statev2.sqlite.
+            f"STATE={shlex.quote(str((acp_dir.parents[3] / 'statev2.sqlite').resolve()))}",
+            '# Any lsof output (open handle, error, or lsof missing) on either DB refuses the restore.',
             'busy="$(lsof -n -P -- "$TARGET" 2>&1 || true)"',
+            'if [ -e "$STATE" ]; then busy="$busy$(lsof -n -P -- "$STATE" 2>&1 || true)"; fi',
             '[ -z "$busy" ] || { echo "ERROR: T3 Code may still be running: $busy" >&2; exit 1; }',
             'cd "$BUNDLE_DIR"',
             """/usr/bin/sqlite3 -bail "$TARGET" "ATTACH 'conversation_summaries.db' AS bak;""",
             "INSERT INTO main.conversation_summaries SELECT * FROM bak.conversation_summaries",
-            "WHERE conversation_id NOT IN (SELECT conversation_id FROM main.conversation_summaries);",
+            "WHERE NOT EXISTS (SELECT 1 FROM main.conversation_summaries m",
+            "WHERE m.conversation_id = bak.conversation_summaries.conversation_id);",
             """SELECT 'Restored ' || changes() || ' missing row(s).';" """,
             "",
         ])
@@ -1609,20 +1614,13 @@ def find_prunable_summary_ids(
     disk_ids: Set[str],
     deleted_ids: Set[str],
     superseded_ids: Set[str],
-    cleaned_this_run: Set[str] = frozenset(),
-    only_cleaned: bool = False,
 ) -> List[str]:
-    """Q01 narrowed rule: inactive, absent from disk, and backed by T3 evidence, empty shell, or just cleaned."""
-    out: List[str] = []
-    for cid, row in summaries.items():
-        if cid in active_ids or cid in disk_ids:
-            continue
-        if only_cleaned:
-            if cid in cleaned_this_run:
-                out.append(cid)
-        elif cid in deleted_ids or cid in superseded_ids or cid in cleaned_this_run or row.is_empty_shell:
-            out.append(cid)
-    return sorted(out)
+    """Q01 narrowed rule: inactive, absent from disk, and backed by T3 evidence or an empty shell."""
+    return sorted(
+        cid for cid, row in summaries.items()
+        if cid not in active_ids and cid not in disk_ids
+        and (cid in deleted_ids or cid in superseded_ids or row.is_empty_shell)
+    )
 
 
 def estimate_pruned_summaries(
@@ -1665,6 +1663,10 @@ def build_plan(
         summaries_exists, summaries = read_summary_index(acp_dir)
         subagent_graph = collect_subagent_graph(acp_dir, summaries)
         active_map = expand_descendants(state.active_uuids, subagent_graph, "@note_subagent")
+        # The breaker counts only T3-backed actives: the env fallback must not mask a broken whitelist.
+        t3_active = expand_descendants(
+            {u: v for u, v in state.active_uuids.items() if v[0] != "@note_cur_env"}, subagent_graph, "@note_subagent"
+        )
         deleted_map, deleted_ts_map = expand_deleted_descendants(
             state.deleted_uuids, state.deleted_timestamps, subagent_graph, "@note_del_subagent"
         )
@@ -1684,7 +1686,8 @@ def build_plan(
             agy_title = agy_row.title if agy_row else ""
             if uid in active_map:
                 cat, (detail, t3_title) = "ACTIVE", active_map[uid]
-                total_active_matches += 1
+                if uid in t3_active:
+                    total_active_matches += 1
             elif uid in deleted_map:
                 cat, (detail, t3_title) = "DELETED", deleted_map[uid]
             elif uid in state.superseded_uuids:
@@ -1727,6 +1730,7 @@ def build_plan(
         reports.append(ProfileReport(
             profile_name, acp_dir, sessions, orphan_summary_ids, set(summaries.keys()),
             summaries_exists, summaries_open, staging_leftovers, lsof_err, t3_db_open, t3_lsof_err,
+            active_ids=set(active_map),
         ))
 
     if state.has_live_antigravity_threads and total_disk_sessions > 0 and total_active_matches == 0:
@@ -2949,54 +2953,38 @@ def _run_cleanup(
         if any_file_error:
             add_warn(tr("skip_idx_after_err"))
         else:
-            fresh_state: Optional[T3State] = None
-            state_db_path: Optional[Path] = None
+            fresh_reports: List[ProfileReport] = []
             try:
-                state_db_path = verify_t3_contract(t3_home / "userdata")
-                fresh_state = load_t3_state(state_db_path)
+                # Full rescan: same contract check, subagent expansion, circuit breaker and lsof as the preview.
+                _, fresh_reports = build_plan(
+                    t3_home, include_superseded=True, include_unknown=True,
+                    min_age_hours=min_age_hours, skip_lsof=skip_lsof,
+                )
             except ContractError as exc:
                 add_err(str(exc), code=2, prefix=st.bold_red("ERROR (fail-closed): "))
             except Exception as exc:
                 add_err(str(exc), code=1, prefix=st.bold_red("ERROR: "))
 
-            if fresh_state is not None and state_db_path is not None:
-                t3_db_open, t3_lsof_err = (False, None) if skip_lsof else inspect_file_open(state_db_path)
-                multi_profile = len(reports) > 1
-                for rep in reports:
+            if fresh_reports:
+                multi_profile = len(fresh_reports) > 1
+                for rep in fresh_reports:
                     if not rep.summaries_db_exists:
                         continue
                     cleaned_here = cleaned_uuids_by_acp.get(rep.acp_dir, set())
                     if prune_only_cleaned and not cleaned_here:
                         continue
-                    _, summaries = read_summary_index(rep.acp_dir)
-                    if not summaries:
-                        continue
-                    disk_after = scan_disk_sessions(rep.acp_dir)
-                    sub_graph = collect_subagent_graph(rep.acp_dir, summaries)
-                    active_now = expand_descendants(fresh_state.active_uuids, sub_graph, "@note_subagent")
-                    deleted_now, _ = expand_deleted_descendants(
-                        fresh_state.deleted_uuids, fresh_state.deleted_timestamps, sub_graph, "@note_del_subagent"
-                    )
-                    for u in active_now:
-                        deleted_now.pop(u, None)
-                    safe_ids = find_prunable_summary_ids(
-                        summaries,
-                        active_ids=set(active_now),
-                        disk_ids=set(disk_after),
-                        deleted_ids=set(deleted_now),
-                        superseded_ids=set(fresh_state.superseded_uuids),
-                        cleaned_this_run=cleaned_here,
-                        only_cleaned=prune_only_cleaned,
-                    )
+                    candidates = set() if prune_only_cleaned else set(rep.orphan_summary_ids)
+                    candidates |= cleaned_here & rep.summary_ids
+                    safe_ids = sorted(candidates - rep.active_ids - {s.uuid for s in rep.sessions})
                     if not safe_ids:
                         continue
 
-                    if scan_staging_leftovers(rep.acp_dir):
+                    if rep.staging_leftovers:
                         add_warn(tr("skip_idx_staging", p=rep.profile_name[:12], path=str(rep.acp_dir.parent / ".t3-clean-staging")))
                         continue
 
-                    _, summaries_open, lsof_err = (set(), False, None) if skip_lsof else inspect_open_handles(rep.acp_dir)
-                    if t3_db_open or t3_lsof_err or lsof_err or summaries_open or is_profile_in_use_by_process(rep.acp_dir.parent):
+                    if (rep.t3_db_open or rep.t3_lsof_error or rep.lsof_error or rep.summaries_open
+                            or is_profile_in_use_by_process(rep.acp_dir.parent)):
                         add_warn(tr("skip_idx_busy", p=rep.profile_name[:12]))
                     else:
                         try:

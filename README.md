@@ -116,7 +116,7 @@ bash ./t3-session-cleaner-YYYY-MM-DD_HHMMSS/restore.sh
 
 `restore.sh` moves each session back to its exact original paths and skips an entire UUID group if any target file conflicts.
 
-> **Note**: Restoring a session bundle from Trash restores the session files on disk, but does **not** automatically re-insert rows removed from `conversation_summaries.db`. If the index was also synced or pruned, run `restore.sh` inside the corresponding `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer rows.
+> **Note**: Restoring a session bundle from Trash restores the session files on disk, but does **not** automatically re-insert rows removed from `conversation_summaries.db`. If the index was also synced or pruned, run `restore.sh` inside the corresponding `t3-session-cleaner-summaries-backup-*` folder to merge missing rows back without losing newer rows. Quit T3 Code first: it refuses to run while T3 or `agy` still has either database open.
 
 ## Requirements
 

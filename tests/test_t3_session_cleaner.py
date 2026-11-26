@@ -263,6 +263,11 @@ def run_pty(cmd, env, cols=92, rows=26, steps=()):
 
 class TestT3SessionCleaner(unittest.TestCase):
     def setUp(self):
+        # Running inside an Antigravity agent terminal must not leak its session into the fixtures.
+        env_patch = mock.patch.dict(os.environ)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        os.environ.pop("ANTIGRAVITY_CONVERSATION_ID", None)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.trash_dir = self.root / "trash"
@@ -328,6 +333,24 @@ class TestT3SessionCleaner(unittest.TestCase):
         with self.assertRaises(mod.ContractError):
             mod.build_plan(t_cb, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
 
+        # Run by an agent inside T3: the env session stays protected but must not satisfy the breaker on its own.
+        t_env = self.root / "t_cb_env"
+        u_act = "11111111-1111-1111-1111-111111111111"
+        make_fixture(t_env, del_sizes=(4096,))
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": u_act}):
+            _, reps_env = mod.build_plan(t_env, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
+            self.assertEqual({s.uuid: s.category for s in reps_env[0].sessions}[u_act], "ACTIVE")
+            drift = "99999999-9999-9999-9999-999999999999"
+            c_env = sqlite3.connect(t_env / "userdata" / "statev2.sqlite")
+            c_env.execute(
+                "UPDATE orchestration_v2_projection_provider_threads SET provider_thread_id=?, payload_json=? WHERE thread_id='t-act'",
+                (f"native-thread:{drift}", json.dumps({"nativeThreadRef": {"driver": "antigravity", "nativeId": drift}})),
+            )
+            c_env.commit()
+            c_env.close()
+            with self.assertRaises(mod.ContractError):
+                mod.build_plan(t_env, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
+
     def test_subagent_protection_and_orphan_counts(self):
         t = self.root / "t_sub"
         orphans = (
@@ -350,6 +373,16 @@ class TestT3SessionCleaner(unittest.TestCase):
         t = self.root / "t_trash"
         acps, del_ids = make_fixture(t, del_sizes=(4096,))
         target_db = acps[0] / "conversations" / f"{del_ids[0]}.db"
+        # Real sessions also own brain/<uuid>/ and annotations/<uuid>.pbtxt; they must leave and return together.
+        brain_file = acps[0] / "brain" / del_ids[0] / "task.md"
+        brain_file.parent.mkdir(parents=True)
+        brain_file.write_text("notes")
+        ann_file = acps[0] / "annotations" / f"{del_ids[0]}.pbtxt"
+        ann_file.parent.mkdir(parents=True)
+        ann_file.write_text("ann")
+        old = time.time() - 48 * 3600
+        for p in (brain_file, brain_file.parent, ann_file):
+            os.utime(p, (old, old))
 
         fail_stub = make_stub_trash(self.root / "bin", self.trash_dir, fail=True)
         fail_env = {**self.env, "T3_CLEAN_TRASH_BIN": str(fail_stub)}
@@ -360,12 +393,16 @@ class TestT3SessionCleaner(unittest.TestCase):
         r_ok = subprocess.run([str(SCRIPT), "--t3-home", str(t), "--apply", "-y"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r_ok.returncode, 0, r_ok.stdout + r_ok.stderr)
         self.assertFalse(target_db.exists())
+        self.assertFalse(brain_file.parent.exists())
+        self.assertFalse(ann_file.exists())
         bundles = list(self.trash_dir.glob("t3-session-cleaner-2*"))
         self.assertEqual(len(bundles), 1)
         self.assertTrue((bundles[0] / "manifest.json").is_file())
         r_rest = subprocess.run(["bash", str(bundles[0] / "restore.sh")], capture_output=True, text=True)
         self.assertEqual(r_rest.returncode, 0)
         self.assertTrue(target_db.exists())
+        self.assertEqual(brain_file.read_text(), "notes")
+        self.assertEqual(ann_file.read_text(), "ann")
 
     def test_summaries_contract_wal_backup_and_multiprofile(self):
         t = self.root / "t_sum"
@@ -726,6 +763,8 @@ class TestT3SessionCleaner(unittest.TestCase):
         u_new = "66666666-6666-6666-6666-000000000001"
         conn = sqlite3.connect(sdb)
         conn.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)", (u_new, "Post-backup", 7, "2026-11-25", ""))
+        # A NULL id in the live table must not make the restore silently skip every row.
+        conn.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)", (None, "Null id", 1, "2026-11-25", ""))
         conn.commit()
         conn.close()
 
@@ -742,6 +781,16 @@ class TestT3SessionCleaner(unittest.TestCase):
         bad_lsof.chmod(0o755)
         r_badlsof = subprocess.run(["/bin/bash", str(restore_sh)], env={**self.env, "PATH": f"{bad_lsof_dir}:{os.environ['PATH']}"}, capture_output=True, text=True)
         self.assertNotEqual(r_badlsof.returncode, 0)
+
+        # (2b) T3 still running (statev2.sqlite open) even though nobody holds the index -> refused
+        hold = sqlite3.connect(t / "userdata" / "statev2.sqlite")
+        hold.execute("SELECT count(*) FROM orchestration_v2_projection_threads").fetchone()
+        try:
+            r_t3 = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
+        finally:
+            hold.close()
+        self.assertNotEqual(r_t3.returncode, 0)
+        self.assertIn("may still be running", r_t3.stderr)
 
         # (3) Normal merge restore -> restores orphan row AND keeps u_new
         r_merge = subprocess.run(["/bin/bash", str(restore_sh)], env=self.env, capture_output=True, text=True)
@@ -1012,6 +1061,27 @@ class TestT3SessionCleaner(unittest.TestCase):
         self.assertEqual(rc2, 2)
         self.assertIn("Moved bundle to Trash", out2.getvalue())
         self.assertIn("4.0 KB", out2.getvalue())
+
+        # Case 3: index-only prune (no files chosen) still trips the circuit breaker if T3 data drifts after preview
+        t3 = self.root / "t_r11c"
+        orphan = "33333333-3333-3333-3333-000000000001"
+        acps3, _ = make_fixture(t3, del_sizes=(), orphan_ids=(orphan,))
+        _, reps3 = mod.build_plan(t3, include_superseded=False, include_unknown=False, min_age_hours=24, skip_lsof=True)
+        drift = "99999999-9999-9999-9999-999999999999"
+        c3 = sqlite3.connect(t3 / "userdata" / "statev2.sqlite")
+        c3.execute(
+            "UPDATE orchestration_v2_projection_provider_threads SET provider_thread_id=?, payload_json=? WHERE thread_id='t-act'",
+            (f"native-thread:{drift}", json.dumps({"nativeThreadRef": {"driver": "antigravity", "nativeId": drift}})),
+        )
+        c3.commit()
+        c3.close()
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err3:
+            rc3 = mod.execute_cleanup(t3, reps3, [], prune_summaries=True, skip_lsof=True, st=mod.Style(False), tr=mod.Translator("en"))
+        self.assertEqual(rc3, 2)
+        self.assertIn("circuit breaker", err3.getvalue())
+        c3 = sqlite3.connect(acps3[0] / "conversation_summaries.db")
+        self.assertEqual(c3.execute("SELECT count(*) FROM conversation_summaries WHERE conversation_id=?", (orphan,)).fetchone()[0], 1)
+        c3.close()
 
     def test_r12_multiprofile_partial_failure_reports_separately_and_skips_index(self):
         t = self.root / "t_r12"
