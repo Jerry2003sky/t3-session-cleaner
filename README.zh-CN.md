@@ -4,7 +4,7 @@
 
 **安全预览、交互筛选并清理 T3 Code 删除对话后残留在本地的会话数据**（macOS，当前专注 Antigravity）。
 
-[![Release](https://img.shields.io/github/v/release/Jerry2003sky/t3-session-cleaner?label=release)](https://github.com/Jerry2003sky/t3-session-cleaner/releases)
+[![Release](https://img.shields.io/badge/release-v0.2.1-blue)](https://github.com/Jerry2003sky/t3-session-cleaner/releases)
 [![macOS 15+](https://img.shields.io/badge/macOS-15%2B-111318?logo=apple&logoColor=white)](#快速开始)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](#快速开始)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-2ea44f)](#快速开始)
